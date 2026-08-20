@@ -49,6 +49,14 @@ st.markdown(
 def init_db():
   conn = sqlite3.connect("unichat.db", check_same_thread=False)
   cursor = conn.cursor()
+  # Users table to enforce unique usernames
+  cursor.execute(
+      """
+        CREATE TABLE IF NOT EXISTS users (
+            username TEXT PRIMARY KEY
+        )
+    """
+  )
   # Messages table
   cursor.execute(
       """
@@ -89,7 +97,12 @@ conn, cursor = init_db()
 
 # Initialize Session State defaults
 if "username" not in st.session_state:
-  st.session_state.username = "AdminMike1"
+  default_user = "AdminMike1"
+  cursor.execute(
+      "INSERT OR IGNORE INTO users (username) VALUES (?)", (default_user,)
+  )
+  conn.commit()
+  st.session_state.username = default_user
 
 if "safe_chat" not in st.session_state:
   st.session_state.safe_chat = True
@@ -199,9 +212,28 @@ with st.sidebar:
         value=st.session_state.simulate_network_error,
     )
     if st.button("Update Profile"):
-      st.session_state.username = new_name
-      st.success("Profile updated!")
-      st.rerun()
+      new_name = new_name.strip()
+      if not new_name:
+        st.error("Username cannot be empty.")
+      else:
+        # Check if username is already taken by someone else
+        cursor.execute("SELECT username FROM users WHERE username = ?", (new_name,))
+        existing = cursor.fetchone()
+
+        if existing and new_name != st.session_state.username:
+          st.error(
+              f"The username '{new_name}' is already taken. Please choose another"
+              " one."
+          )
+        else:
+          # Register new name or update state
+          cursor.execute(
+              "INSERT OR IGNORE INTO users (username) VALUES (?)", (new_name,)
+          )
+          conn.commit()
+          st.session_state.username = new_name
+          st.success("Profile updated successfully!")
+          st.rerun()
 
   st.markdown("---")
 
@@ -211,18 +243,28 @@ with st.sidebar:
         "Enter username to add", placeholder="e.g. JohnDoe"
     )
     if st.button("Send Connection Request"):
+      search_target = search_target.strip()
       if search_target and search_target != st.session_state.username:
-        current_friends = get_friends(st.session_state.username)
-        if search_target in current_friends:
-          st.warning("You are already connected with this user.")
+        # Check if user exists in the system
+        cursor.execute(
+            "SELECT username FROM users WHERE username = ?", (search_target,)
+        )
+        user_exists = cursor.fetchone()
+
+        if not user_exists:
+          st.error(f"User '{search_target}' does not exist.")
         else:
-          cursor.execute(
-              "INSERT OR IGNORE INTO requests (username, requester) VALUES"
-              " (?, ?)",
-              (search_target, st.session_state.username),
-          )
-          conn.commit()
-          st.success(f"Request sent to {search_target}!")
+          current_friends = get_friends(st.session_state.username)
+          if search_target in current_friends:
+            st.warning("You are already connected with this user.")
+          else:
+            cursor.execute(
+                "INSERT OR IGNORE INTO requests (username, requester) VALUES"
+                " (?, ?)",
+                (search_target, st.session_state.username),
+            )
+            conn.commit()
+            st.success(f"Request sent to {search_target}!")
       else:
         st.error("Please enter a valid username other than your own.")
 
