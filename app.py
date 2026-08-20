@@ -65,8 +65,9 @@ def init_db():
   cursor.execute(
       """
         CREATE TABLE IF NOT EXISTS friends (
-            username TEXT PRIMARY KEY,
-            friend_name TEXT
+            username TEXT,
+            friend_name TEXT,
+            PRIMARY KEY (username, friend_name)
         )
     """
   )
@@ -74,8 +75,9 @@ def init_db():
   cursor.execute(
       """
         CREATE TABLE IF NOT EXISTS requests (
-            username TEXT PRIMARY KEY,
-            requester TEXT
+            username TEXT,
+            requester TEXT,
+            PRIMARY KEY (username, requester)
         )
     """
   )
@@ -96,7 +98,7 @@ if "simulate_network_error" not in st.session_state:
   st.session_state.simulate_network_error = False
 
 if "current_channel" not in st.session_state:
-  st.session_state.current_channel = "WorkSpace"
+  st.session_state.current_channel = "General Chat"
 
 if "in_call" not in st.session_state:
   st.session_state.in_call = False
@@ -113,37 +115,18 @@ if "inspect_user" not in st.session_state:
 if "blocked_users" not in st.session_state:
   st.session_state.blocked_users = []
 
-# Populate initial default friends/requests in DB if empty
-cursor.execute("SELECT COUNT(*) FROM friends")
-if cursor.fetchone()[0] == 0:
-  cursor.execute(
-      "INSERT OR IGNORE INTO friends (username, friend_name) VALUES (?, ?)",
-      ("AdminMike1", "User_Delta"),
-  )
-  cursor.execute(
-      "INSERT OR IGNORE INTO friends (username, friend_name) VALUES (?, ?)",
-      ("AdminMike1", "NewBuddy99"),
-  )
-  cursor.execute(
-      "INSERT OR IGNORE INTO requests (username, requester) VALUES (?, ?)",
-      ("AdminMike1", "User_Delta"),
-  )
-  conn.commit()
-
 
 # Helper fetch functions
-def get_friends():
+def get_friends(username):
   cursor.execute(
-      "SELECT friend_name FROM friends WHERE username = ?",
-      (st.session_state.username,),
+      "SELECT friend_name FROM friends WHERE username = ?", (username,)
   )
   return [row[0] for row in cursor.fetchall()]
 
 
-def get_requests():
+def get_requests(username):
   cursor.execute(
-      "SELECT requester FROM requests WHERE username = ?",
-      (st.session_state.username,),
+      "SELECT requester FROM requests WHERE username = ?", (username,)
   )
   return [row[0] for row in cursor.fetchall()]
 
@@ -156,22 +139,16 @@ def get_messages(channel):
   return [{"user": r[0], "text": r[1], "time": r[2]} for r in rows]
 
 
-# Groups Configuration (Stored locally or shared)
+# Groups Configuration
 if "groups" not in st.session_state:
   st.session_state.groups = {
       "General Chat": {
           "owner": "System",
-          "members": ["AdminMike1", "User_Delta"],
+          "members": ["AdminMike1"],
           "banned": [],
-      },
-      "WorkSpace": {
-          "owner": "AdminMike1",
-          "members": ["AdminMike1", "User_Delta"],
-          "banned": [],
-      },
+      }
   }
 
-# Standard list of common swear words to filter when Safe Chat is on
 BAD_WORDS = [
     "shit",
     "fuck",
@@ -228,28 +205,35 @@ with st.sidebar:
 
   st.markdown("---")
 
-  with st.expander("➕ Create Group Chat"):
-    new_group_name = st.text_input("Group Name")
-    if st.button("Create Group"):
-      if new_group_name and new_group_name not in st.session_state.groups:
-        st.session_state.groups[new_group_name] = {
-            "owner": st.session_state.username,
-            "members": [st.session_state.username],
-            "banned": [],
-        }
-        st.success(f"Group '{new_group_name}' created!")
-        st.rerun()
+  # Add Friend / Search User Expander
+  with st.expander("🔍 Search & Add Friend"):
+    search_target = st.text_input(
+        "Enter username to add", placeholder="e.g. JohnDoe"
+    )
+    if st.button("Send Connection Request"):
+      if search_target and search_target != st.session_state.username:
+        current_friends = get_friends(st.session_state.username)
+        if search_target in current_friends:
+          st.warning("You are already connected with this user.")
+        else:
+          cursor.execute(
+              "INSERT OR IGNORE INTO requests (username, requester) VALUES"
+              " (?, ?)",
+              (search_target, st.session_state.username),
+          )
+          conn.commit()
+          st.success(f"Request sent to {search_target}!")
       else:
-        st.error("Invalid or existing group name.")
+        st.error("Please enter a valid username other than your own.")
 
-  current_requests = get_requests()
+  current_requests = get_requests(st.session_state.username)
   with st.expander(f"🔔 Connection Requests ({len(current_requests)})"):
     if not current_requests:
       st.write("No pending requests.")
     else:
       for req in list(current_requests):
         col_r1, col_r2 = st.columns(2)
-        st.write(f"**{req}** wants to talk. Accept/Decline?")
+        st.write(f"**{req}** wants to connect.")
         if col_r1.button("Accept", key=f"acc_{req}"):
           cursor.execute(
               "INSERT OR IGNORE INTO friends (username, friend_name) VALUES"
@@ -257,10 +241,16 @@ with st.sidebar:
               (st.session_state.username, req),
           )
           cursor.execute(
+              "INSERT OR IGNORE INTO friends (username, friend_name) VALUES"
+              " (?, ?)",
+              (req, st.session_state.username),
+          )
+          cursor.execute(
               "DELETE FROM requests WHERE username = ? AND requester = ?",
               (st.session_state.username, req),
           )
           conn.commit()
+          st.success(f"You are now connected with {req}!")
           st.rerun()
         if col_r2.button("Reject", key=f"rej_{req}"):
           cursor.execute(
@@ -278,7 +268,7 @@ with st.sidebar:
 
   # Direct Messages Section
   st.markdown("### 💬 Direct Messages")
-  current_friends = get_friends()
+  current_friends = get_friends(st.session_state.username)
   for friend in current_friends:
     if friend not in st.session_state.blocked_users:
       if search_filter.lower() in friend.lower():
@@ -310,46 +300,6 @@ st.title(
     f"{'#' if st.session_state.current_channel in st.session_state.groups else '💬'} {st.session_state.current_channel}"
 )
 
-# Group Owner & Management Controls
-curr_group = st.session_state.groups.get(st.session_state.current_channel)
-if curr_group and curr_group["owner"] == st.session_state.username:
-  with st.expander("🛡️ Group Owner Controls & Settings"):
-    renamed_input = st.text_input(
-        "Rename Group Chat", value=st.session_state.current_channel
-    )
-    if st.button("Save New Name"):
-      old_name = st.session_state.current_channel
-      if (
-          renamed_input
-          and renamed_input != old_name
-          and renamed_input not in st.session_state.groups
-      ):
-        st.session_state.groups[renamed_input] = (
-            st.session_state.groups.pop(old_name)
-        )
-        cursor.execute(
-            "UPDATE messages SET channel = ? WHERE channel = ?",
-            (renamed_input, old_name),
-        )
-        conn.commit()
-        st.session_state.current_channel = renamed_input
-        st.success("Group renamed successfully!")
-        st.rerun()
-      else:
-        st.error("Invalid name or name already exists.")
-
-    st.markdown("---")
-    member_to_ban = st.selectbox(
-        "Ban Member",
-        [m for m in curr_group["members"] if m != st.session_state.username],
-    )
-    if st.button("Ban User"):
-      if member_to_ban:
-        curr_group["members"].remove(member_to_ban)
-        curr_group["banned"].append(member_to_ban)
-        st.success(f"{member_to_ban} has been banned from the group.")
-        st.rerun()
-
 # User Profile Card Inspector Overlay
 if st.session_state.inspect_user:
   u = st.session_state.inspect_user
@@ -361,35 +311,26 @@ if st.session_state.inspect_user:
       st.session_state.inspect_user = None
       st.rerun()
   else:
-    current_friends = get_friends()
+    current_friends = get_friends(st.session_state.username)
     col_act1, col_act2, col_act3, col_act4 = st.columns(4)
     if col_act1.button("💬 Talk"):
-      if u in current_friends or u in st.session_state.groups:
-        st.session_state.current_channel = u
-        st.session_state.inspect_user = None
-        st.rerun()
-      else:
-        cursor.execute(
-            "INSERT OR IGNORE INTO requests (username, requester) VALUES (?, ?)",
-            (u, st.session_state.username),
-        )
-        conn.commit()
-        st.warning(
-            f"Connection request sent to {u}! Waiting for them to accept..."
-        )
+      st.session_state.current_channel = u
+      st.session_state.inspect_user = None
+      st.rerun()
     if col_act2.button("🚫 Block"):
       st.session_state.blocked_users.append(u)
       st.session_state.inspect_user = None
       st.success(f"Blocked {u}.")
       st.rerun()
-    if col_act3.button("🗑️ Delete Contact"):
+    if col_act3.button("🗑️ Unfriend"):
       cursor.execute(
-          "DELETE FROM friends WHERE username = ? AND friend_name = ?",
-          (st.session_state.username, u),
+          "DELETE FROM friends WHERE (username = ? AND friend_name = ?) OR"
+          " (username = ? AND friend_name = ?)",
+          (st.session_state.username, u, u, st.session_state.username),
       )
       conn.commit()
       st.session_state.inspect_user = None
-      st.success(f"Removed {u} from contacts.")
+      st.success(f"Unfriended {u}.")
       st.rerun()
     if col_act4.button("Close"):
       st.session_state.inspect_user = None
@@ -405,7 +346,7 @@ with col_btn2:
   if st.button("⚙️ Settings"):
     st.info("Settings panel active.")
 
-# Optimized WebRTC Call Interface with Working Mute & Camera Controls
+# Optimized WebRTC Call Interface
 if st.session_state.in_call:
   st.markdown("### 🔴 Live Video/Audio Call Active")
 
@@ -432,7 +373,6 @@ if st.session_state.in_call:
       st.session_state.cam_off = False
       st.rerun()
 
-  # Multi-server configuration to eliminate connection delay & latency
   rtc_configuration = RTCConfiguration({
       "iceServers": [{
           "urls": [
@@ -499,9 +439,11 @@ with st.form(key="message_form", clear_on_submit=True):
   submit_btn = st.form_submit_button(label="⬆ Send")
 
   if submit_btn and user_input:
-    is_banned = False
-    if curr_group and st.session_state.username in curr_group["banned"]:
-      is_banned = True
+    curr_group = st.session_state.groups.get(st.session_state.current_channel)
+    is_banned = (
+        curr_group
+        and st.session_state.username in curr_group.get("banned", [])
+    )
 
     if is_banned:
       st.error("You are banned from sending messages in this group.")
