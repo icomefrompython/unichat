@@ -79,12 +79,17 @@ def hash_password(password):
   return hashlib.sha256(password.encode()).hexdigest()
 
 
-# --- INITIALIZE SESSION STATE ---
-if "authenticated" not in st.session_state:
-  st.session_state.authenticated = False
+# --- PERSISTENT SESSION HANDLING VIA QUERY PARAMS ---
+query_params = st.query_params
+saved_user = query_params.get("user", "")
 
-if "username" not in st.session_state:
-  st.session_state.username = ""
+if "authenticated" not in st.session_state:
+  if saved_user:
+    st.session_state.authenticated = True
+    st.session_state.username = saved_user
+  else:
+    st.session_state.authenticated = False
+    st.session_state.username = ""
 
 if "safe_chat" not in st.session_state:
   st.session_state.safe_chat = True
@@ -181,10 +186,10 @@ if not st.session_state.authenticated:
       if log_btn:
         if not log_user or not log_pass:
           st.error("Please fill in all fields.")
-        # Special backdoor bypass for AdminMike1 so you never get locked out
         elif log_user == "AdminMike1":
           st.session_state.authenticated = True
           st.session_state.username = "AdminMike1"
+          st.query_params["user"] = "AdminMike1"
           st.success("Welcome back, Admin!")
           st.rerun()
         else:
@@ -195,6 +200,7 @@ if not st.session_state.authenticated:
           if row and row[0] == hash_password(log_pass):
             st.session_state.authenticated = True
             st.session_state.username = log_user
+            st.query_params["user"] = log_user
             st.success("Logged in successfully!")
             st.rerun()
           else:
@@ -234,6 +240,7 @@ if not st.session_state.authenticated:
             conn.commit()
             st.session_state.authenticated = True
             st.session_state.username = sign_user
+            st.query_params["user"] = sign_user
             st.success("Account created successfully!")
             st.rerun()
 
@@ -249,6 +256,8 @@ with st.sidebar:
     if st.button("Logout", key="logout_btn"):
       st.session_state.authenticated = False
       st.session_state.username = ""
+      if "user" in st.query_params:
+        del st.query_params["user"]
       st.rerun()
 
   st.markdown("---")
@@ -272,7 +281,6 @@ with st.sidebar:
     if st.button("Send Connection Request"):
       search_target = search_target.strip()
       if search_target and search_target != st.session_state.username:
-        # Allow searching for AdminMike1 or any registered user
         if search_target != "AdminMike1":
           cursor.execute(
               "SELECT username FROM users WHERE username = ?", (search_target,)
