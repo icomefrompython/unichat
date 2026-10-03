@@ -1,5 +1,7 @@
 from datetime import datetime
 import hashlib
+import random
+import string
 import sqlite3
 import streamlit as st
 from streamlit_webrtc import RTCConfiguration, webrtc_streamer
@@ -143,6 +145,12 @@ conn, cursor = init_db()
 
 def hash_password(password):
     return hashlib.sha256(password.encode()).hexdigest()
+
+
+def generate_random_suffix(length=20):
+    return "".join(
+        random.choices(string.ascii_letters + string.digits, k=length)
+    )
 
 
 # --- PERSISTENT SESSION HANDLING ---
@@ -398,7 +406,7 @@ if not st.session_state.authenticated:
 
     with auth_tab2:
         with st.form("signup_form"):
-            sign_user = st.text_input("Choose a Username").strip()
+            sign_user = st.text_input("Choose a Base Username").strip()
             sign_pass = st.text_input("Choose a Password", type="password")
             remember_signup = st.checkbox(
                 "Remember Me", value=True, key="signup_rem"
@@ -409,36 +417,36 @@ if not st.session_state.authenticated:
                 sign_user = sign_user.strip()
                 if not sign_user or not sign_pass:
                     st.error("Please fill in all fields.")
-                elif sign_user == "AdminMike1":
+                elif sign_user.lower() == "adminmike1":
                     st.error("The username 'AdminMike1' is reserved.")
                 elif len(sign_user) < 3:
                     st.error("Username must be at least 3 characters long.")
                 else:
-                    cursor.execute(
-                        "SELECT username FROM users WHERE username = ?",
-                        (sign_user,),
+                    # Automatically generate the unique handle with extra random suffix letters
+                    unique_handle = (
+                        f"{sign_user}_{generate_random_suffix(24)}"
                     )
-                    if cursor.fetchone():
-                        st.error(f"The username '{sign_user}' is already taken.")
-                    else:
-                        cursor.execute(
-                            "INSERT INTO users (username, password, bio, status,"
-                            " last_seen) VALUES (?, ?, ?, ?, ?)",
-                            (
-                                sign_user,
-                                hash_password(sign_pass),
-                                "Hey there! I am using Unichat.",
-                                "🟢 Online",
-                                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                            ),
-                        )
-                        conn.commit()
-                        st.session_state.authenticated = True
-                        st.session_state.username = sign_user
-                        if remember_signup:
-                            st.query_params["user"] = sign_user
-                        st.success("Account created successfully!")
-                        st.rerun()
+
+                    cursor.execute(
+                        "INSERT INTO users (username, password, bio, status,"
+                        " last_seen) VALUES (?, ?, ?, ?, ?)",
+                        (
+                            unique_handle,
+                            hash_password(sign_pass),
+                            "Hey there! I am using Unichat.",
+                            "🟢 Online",
+                            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        ),
+                    )
+                    conn.commit()
+                    st.session_state.authenticated = True
+                    st.session_state.username = unique_handle
+                    if remember_signup:
+                        st.query_params["user"] = unique_handle
+                    st.success(
+                        f"Account created successfully! Your full handle is: {unique_handle}"
+                    )
+                    st.rerun()
 
     st.stop()
 
@@ -516,7 +524,7 @@ with st.sidebar:
 
     with st.expander("🔍 Search & Add Friend"):
         search_target = st.text_input(
-            "Enter username to add", placeholder="e.g. JohnDoe"
+            "Enter full username (with suffix)", placeholder="e.g. user_Hhdf..."
         )
         if st.button("Send Connection Request"):
             search_target = search_target.strip()
@@ -888,7 +896,7 @@ def live_chat_stream():
                         st.session_state.inspect_user = msg["user"]
                         st.rerun()
                 with col_msg_body:
-                    # Render attached media/files (Images, Videos, Documents)
+                    # Render attached media/files
                     file_html = ""
                     if msg["file_url"]:
                         if any(
@@ -935,7 +943,7 @@ def live_chat_stream():
         key="emoji_picker",
     )
 
-    # Bottom Message Input & Media/File Uploader (Supports Videos!)
+    # Bottom Message Input & Media/File Uploader
     with st.form(key="message_form", clear_on_submit=True):
         user_input = st.text_input(
             f"Message {st.session_state.current_channel}",
