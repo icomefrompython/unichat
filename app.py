@@ -22,13 +22,14 @@ st.markdown(
     div.stButton > button { background-color: #21262d; color: #c9d1d9; border: 1px solid #30363d; text-align: left; }
     div.stButton > button:hover { background-color: #30363d; color: #ffffff; }
     .badge { background-color: #f85149; color: white; border-radius: 10px; padding: 2px 6px; font-size: 0.75em; font-weight: bold; float: right; }
+    .broadcast-banner { background-color: #1f6feb; color: white; padding: 10px; border-radius: 6px; margin-bottom: 15px; font-weight: bold; text-align: center; }
     </style>
 """,
     unsafe_allow_html=True,
 )
 
 
-# --- DATABASE SETUP (Permanent Storage for Profiles, Groups & Read Tracking) ---
+# --- DATABASE SETUP ---
 def init_db():
     conn = sqlite3.connect("unichat.db", check_same_thread=False)
     cursor = conn.cursor()
@@ -60,10 +61,16 @@ def init_db():
             channel TEXT,
             user TEXT,
             text TEXT,
-            time TEXT
+            time TEXT,
+            file_url TEXT
         )
     """
     )
+    try:
+        cursor.execute("ALTER TABLE messages ADD COLUMN file_url TEXT")
+    except sqlite3.OperationalError:
+        pass
+
     cursor.execute(
         """
         CREATE TABLE IF NOT EXISTS friends (
@@ -118,6 +125,15 @@ def init_db():
         )
     """
     )
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS broadcasts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            text TEXT,
+            time TEXT
+        )
+    """
+    )
     conn.commit()
     return conn, cursor
 
@@ -129,7 +145,7 @@ def hash_password(password):
     return hashlib.sha256(password.encode()).hexdigest()
 
 
-# --- PERSISTENT SESSION HANDLING VIA QUERY PARAMS ---
+# --- PERSISTENT SESSION HANDLING ---
 query_params = st.query_params
 saved_user = query_params.get("user", "")
 
@@ -168,6 +184,9 @@ if "inspect_group" not in st.session_state:
 if "blocked_users" not in st.session_state:
     st.session_state.blocked_users = []
 
+if "editing_msg_id" not in st.session_state:
+    st.session_state.editing_msg_id = None
+
 # Ensure default General Chat group exists
 cursor.execute(
     "INSERT OR IGNORE INTO groups (group_name, owner) VALUES (?, ?)",
@@ -175,8 +194,7 @@ cursor.execute(
 )
 conn.commit()
 
-
-# Update user's last seen timestamp actively
+# Update last seen timestamp
 if st.session_state.authenticated and st.session_state.username:
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     cursor.execute(
@@ -208,17 +226,15 @@ def get_all_groups(username):
     for g_name, owner in all_g:
         if g_name == "General Chat":
             valid_groups.append(g_name)
+        elif owner == username:
+            valid_groups.append(g_name)
         else:
-            # Check if user is owner or member
-            if owner == username:
+            cursor.execute(
+                "SELECT 1 FROM group_members WHERE group_name = ? AND username = ?",
+                (g_name, username),
+            )
+            if cursor.fetchone():
                 valid_groups.append(g_name)
-            else:
-                cursor.execute(
-                    "SELECT 1 FROM group_members WHERE group_name = ? AND username = ?",
-                    (g_name, username),
-                )
-                if cursor.fetchone():
-                    valid_groups.append(g_name)
     return valid_groups
 
 
@@ -245,7 +261,6 @@ def get_group_bans(group_name):
 
 
 def get_db_channel(user, channel):
-    """Maps DMs and Groups to a clean, shared background channel safely."""
     cursor.execute("SELECT 1 FROM groups WHERE group_name = ?", (channel,))
     if cursor.fetchone() or channel == "General Chat":
         return channel
@@ -255,11 +270,14 @@ def get_db_channel(user, channel):
 def get_messages(channel):
     db_chan = get_db_channel(st.session_state.username, channel)
     cursor.execute(
-        "SELECT id, user, text, time FROM messages WHERE channel = ? ORDER BY id ASC",
+        "SELECT id, user, text, time, file_url FROM messages WHERE channel = ? ORDER BY id ASC",
         (db_chan,),
     )
     rows = cursor.fetchall()
-    return [{"id": r[0], "user": r[1], "text": r[2], "time": r[3]} for r in rows]
+    return [
+        {"id": r[0], "user": r[1], "text": r[2], "time": r[3], "file_url": r[4]}
+        for r in rows
+    ]
 
 
 def get_last_message(channel):
@@ -338,7 +356,7 @@ def filter_message(text):
     return text
 
 
-# --- AUTHENTICATION SCREEN (If not logged in) ---
+# --- AUTHENTICATION SCREEN ---
 if not st.session_state.authenticated:
     st.title("💬 Welcome to Unichat")
     st.markdown("Please log in or create an account to start chatting securely.")
@@ -346,16 +364,6 @@ if not st.session_state.authenticated:
     auth_tab1, auth_tab2 = st.tabs(["🔑 Login", "📝 Sign Up"])
 
     with auth_tab1:
-        st.markdown(
-            """
-            <form action="" method="get">
-                <input type="text" autocomplete="username" style="display:none;" />
-                <input type="password" autocomplete="current-password" style="display:none;" />
-            </form>
-        """,
-            unsafe_allow_html=True,
-        )
-
         with st.form("login_form"):
             log_user = st.text_input("Username").strip()
             log_pass = st.text_input("Password", type="password")
@@ -402,10 +410,7 @@ if not st.session_state.authenticated:
                 if not sign_user or not sign_pass:
                     st.error("Please fill in all fields.")
                 elif sign_user == "AdminMike1":
-                    st.error(
-                        "The username 'AdminMike1' is reserved. Please choose"
-                        " another one."
-                    )
+                    st.error("The username 'AdminMike1' is reserved.")
                 elif len(sign_user) < 3:
                     st.error("Username must be at least 3 characters long.")
                 else:
@@ -414,10 +419,7 @@ if not st.session_state.authenticated:
                         (sign_user,),
                     )
                     if cursor.fetchone():
-                        st.error(
-                            f"The username '{sign_user}' is already taken."
-                            " Choose another one."
-                        )
+                        st.error(f"The username '{sign_user}' is already taken.")
                     else:
                         cursor.execute(
                             "INSERT INTO users (username, password, bio, status,"
@@ -440,11 +442,11 @@ if not st.session_state.authenticated:
 
     st.stop()
 
-# --- SIDEBAR (Left Panel - Authenticated) ---
+# --- SIDEBAR ---
 with st.sidebar:
     col_avatar, col_info = st.columns([1, 3])
     with col_avatar:
-        st.markdown("### 🅰️️")
+        st.markdown("### 🅰")
     with col_info:
         st.markdown(f"**{st.session_state.username}**")
         if st.button("Logout", key="logout_btn"):
@@ -455,6 +457,23 @@ with st.sidebar:
             st.rerun()
 
     st.markdown("---")
+
+    # Admin Broadcast Panel (Feature 4)
+    if st.session_state.username == "AdminMike1":
+        with st.expander("📢 Send Broadcast Announcement"):
+            broadcast_text = st.text_area("Broadcast Message")
+            if st.button("Publish Broadcast"):
+                if broadcast_text.strip():
+                    cursor.execute(
+                        "INSERT INTO broadcasts (text, time) VALUES (?, ?)",
+                        (
+                            broadcast_text.strip(),
+                            datetime.now().strftime("%Y-%m-%d %H:%M"),
+                        ),
+                    )
+                    conn.commit()
+                    st.success("Broadcast sent to all users!")
+                    st.rerun()
 
     with st.expander("⚙️ Settings & Profile"):
         st.session_state.safe_chat = st.checkbox(
@@ -495,7 +514,6 @@ with st.sidebar:
 
     st.markdown("---")
 
-    # Add Friend / Search User Expander
     with st.expander("🔍 Search & Add Friend"):
         search_target = st.text_input(
             "Enter username to add", placeholder="e.g. JohnDoe"
@@ -517,7 +535,7 @@ with st.sidebar:
                 else:
                     current_friends = get_friends(st.session_state.username)
                     if search_target in current_friends:
-                        st.warning("You are already connected with this user.")
+                        st.warning("You are already connected.")
                     else:
                         cursor.execute(
                             "INSERT OR IGNORE INTO requests (username,"
@@ -526,10 +544,7 @@ with st.sidebar:
                         )
                         conn.commit()
                         st.success(f"Request sent to {search_target}!")
-            else:
-                st.error("Please enter a valid username other than your own.")
 
-    # Create Group Chat Expander
     with st.expander("➕ Create Group Chat"):
         new_g_name = st.text_input("Group Name", placeholder="e.g. ProjectTeam")
         if st.button("Create Group"):
@@ -601,7 +616,6 @@ with st.sidebar:
 
     st.markdown("---")
 
-    # Direct Messages Section with Unread Badges & Online Indicators
     st.markdown("### 💬 Direct Messages")
     current_friends = get_friends(st.session_state.username)
     for friend in current_friends:
@@ -637,7 +651,6 @@ with st.sidebar:
 
     st.markdown("---")
 
-    # Group Chats Section
     st.markdown("### 🏢 Group Chats")
     my_groups = get_all_groups(st.session_state.username)
     for group in my_groups:
@@ -664,11 +677,24 @@ with st.sidebar:
 cursor.execute("SELECT 1 FROM groups WHERE group_name = ?", (st.session_state.current_channel,))
 is_group = bool(cursor.fetchone() or st.session_state.current_channel == "General Chat")
 
+# Display Broadcast Banners (Feature 4)
+cursor.execute("SELECT text, time FROM broadcasts ORDER BY id DESC LIMIT 1")
+latest_broadcast = cursor.fetchone()
+if latest_broadcast:
+    st.markdown(
+        f"""
+        <div class="broadcast-banner">
+            📢 Announcement ({latest_broadcast[1]}): {latest_broadcast[0]}
+        </div>
+    """,
+        unsafe_allow_html=True,
+    )
+
 st.title(
     f"{'#' if is_group else '💬'} {st.session_state.current_channel}"
 )
 
-# User Profile Card Inspector Overlay
+# User Profile Card Inspector
 if st.session_state.inspect_user:
     u = st.session_state.inspect_user
     cursor.execute(
@@ -685,7 +711,6 @@ if st.session_state.inspect_user:
     )
 
     if u == st.session_state.username:
-        st.warning("This is your own profile account.")
         if st.button("Close Inspector"):
             st.session_state.inspect_user = None
             st.rerun()
@@ -715,19 +740,17 @@ if st.session_state.inspect_user:
             st.rerun()
     st.markdown("---")
 
-# Group Settings Inspector Overlay
+# Group Settings Inspector
 if st.session_state.inspect_group and is_group:
     g_name = st.session_state.current_channel
     g_owner = get_group_owner(g_name)
     g_members = get_group_members(g_name)
-    g_bans = get_group_bans(g_name)
 
     st.info(
-        f"### Group Settings: **#{g_name}**\n* **Owner**: {g_owner}\n* **Members**: {', '.join(g_members) if g_members else 'None'}"
+        f"### Group Settings: **#{g_name}**\n* **Owner**: {g_owner}\n* **Members**: {', '.join(g_members)}"
     )
 
     if g_owner == st.session_state.username and g_name != "General Chat":
-        st.markdown("#### Manage Members")
         add_mem = st.text_input("Add username to group")
         if st.button("Add Member"):
             add_mem = add_mem.strip()
@@ -763,28 +786,22 @@ with col_btn3:
     if st.button("⚙️ Settings"):
         st.info("Settings panel active.")
 
-# Optimized WebRTC Call Interface
+# WebRTC Call Interface
 if st.session_state.in_call:
     st.markdown("### 🔴 Live Video/Audio Call Active")
-
     cc1, cc2, cc3 = st.columns(3)
-
     with cc1:
-        mute_label = (
+        if st.button(
             "🔊 Unmute Mic" if st.session_state.is_muted else "🔇 Mute Mic"
-        )
-        if st.button(mute_label):
+        ):
             st.session_state.is_muted = not st.session_state.is_muted
             st.rerun()
-
     with cc2:
-        cam_label = (
+        if st.button(
             "📷 Turn Cam On" if st.session_state.cam_off else "🚫 Turn Cam Off"
-        )
-        if st.button(cam_label):
+        ):
             st.session_state.cam_off = not st.session_state.cam_off
             st.rerun()
-
     with cc3:
         if st.button("🔴 End Call"):
             st.session_state.in_call = False
@@ -806,22 +823,47 @@ if st.session_state.in_call:
         key="unichat_live_call",
         rtc_configuration=rtc_configuration,
         media_stream_constraints={
-            "audio": {
-                "echoCancellation": True,
-                "noiseSuppression": True,
-                "autoGainControl": True,
-            }
-            if not st.session_state.is_muted
-            else False,
-            "video": False if st.session_state.cam_off else True,
+            "audio": not st.session_state.is_muted,
+            "video": not st.session_state.cam_off,
         },
         async_processing=True,
     )
 
 st.markdown("---")
 
+# Message Search & History Filtering Bar (Feature 2)
+search_query = st.text_input(
+    "🔍 Search messages in this channel...",
+    placeholder="Type keyword to filter history...",
+)
 
-# --- FAST LIVE MESSAGING CONTAINER (Auto-polls every 2 seconds) ---
+# Handle message edits (Feature 5)
+if st.session_state.editing_msg_id:
+    cursor.execute(
+        "SELECT text FROM messages WHERE id = ?",
+        (st.session_state.editing_msg_id,),
+    )
+    edit_row = cursor.fetchone()
+    if edit_row:
+        with st.form("edit_msg_form"):
+            new_text_val = st.text_input(
+                "Edit message", value=edit_row[0]
+            )
+            col_e1, col_e2 = st.columns(2)
+            if col_e1.form_submit_button("Save Changes"):
+                cursor.execute(
+                    "UPDATE messages SET text = ? WHERE id = ?",
+                    (filter_message(new_text_val), st.session_state.editing_msg_id),
+                )
+                conn.commit()
+                st.session_state.editing_msg_id = None
+                st.rerun()
+            if col_e2.form_submit_button("Cancel"):
+                st.session_state.editing_msg_id = None
+                st.rerun()
+
+
+# --- LIVE MESSAGING CONTAINER ---
 @st.fragment(run_every=2)
 def live_chat_stream():
     mark_channel_read(st.session_state.username, st.session_state.current_channel)
@@ -829,69 +871,107 @@ def live_chat_stream():
     chat_container = st.container()
     with chat_container:
         channel_msgs = get_messages(st.session_state.current_channel)
+
+        # Filter messages if search query exists
+        if search_query:
+            channel_msgs = [
+                m for m in channel_msgs if search_query.lower() in m["text"].lower()
+            ]
+
         if not channel_msgs:
-            st.info(
-                f"No messages in {st.session_state.current_channel} yet. Say"
-                " hi below!"
-            )
+            st.info("No messages found.")
         else:
             for idx, msg in enumerate(channel_msgs):
                 col_msg_avatar, col_msg_body = st.columns([1, 15])
                 with col_msg_avatar:
-                    if st.button(
-                        "👤", key=f"prof_{idx}_{msg['user']}={msg['time']}"
-                    ):
+                    if st.button("👤", key=f"prof_{msg['id']}_{idx}"):
                         st.session_state.inspect_user = msg["user"]
                         st.rerun()
                 with col_msg_body:
+                    # Render attached images/files if present (Feature 1)
+                    file_html = ""
+                    if msg["file_url"]:
+                        if any(
+                            msg["file_url"].endswith(ext)
+                            for ext in [".png", ".jpg", ".jpeg", ".gif"]
+                        ):
+                            file_html = f'<br><img src="{msg["file_url"]}" style="max-width: 300px; border-radius: 4px; margin-top: 8px;">'
+                        else:
+                            file_html = f'<br><a href="{msg["file_url"]}" target="_blank">📎 Download Attached File</a>'
+
                     st.markdown(
                         f"""
                         <div class="chat-box">
                             <strong>{msg['user']}</strong> <span style="font-size: 0.75em; color: #8b949e; float: right;">{msg['time']}</span><br>
                             <div style="margin-top: 5px;">{msg['text']}</div>
+                            {file_html}
                         </div>
                     """,
                         unsafe_allow_html=True,
                     )
 
-    # Bottom Message Input Box
+                    # Message Owner Edit/Delete Actions (Feature 5)
+                    if msg["user"] == st.session_state.username:
+                        col_act_e, col_act_d, _ = st.columns([1, 1, 8])
+                        if col_act_e.button("Edit", key=f"edit_{msg['id']}"):
+                            st.session_state.editing_msg_id = msg["id"]
+                            st.rerun()
+                        if col_act_d.button("Delete", key=f"del_{msg['id']}"):
+                            cursor.execute(
+                                "DELETE FROM messages WHERE id = ?", (msg["id"],)
+                            )
+                            conn.commit()
+                            st.rerun()
+
+    # Emoji Picker (Feature 3)
+    selected_emoji = st.selectbox(
+        "Quick Emojis",
+        ["", "😀", "😂", "👍", "❤️", "🔥", "🎉", "🚀", "💡", "🙌"],
+        key="emoji_picker",
+    )
+
+    # Bottom Message Input & File Uploader (Features 1 & 3)
     with st.form(key="message_form", clear_on_submit=True):
         user_input = st.text_input(
             f"Message {st.session_state.current_channel}",
+            value=selected_emoji if selected_emoji else "",
             placeholder=f"Message {st.session_state.current_channel}",
             label_visibility="collapsed",
         )
+        uploaded_file = st.file_uploader(
+            "Attach image or file", type=["png", "jpg", "jpeg", "gif", "pdf", "txt"]
+        )
         submit_btn = st.form_submit_button(label="⬆ Send")
 
-        if submit_btn and user_input:
+        if submit_btn and (user_input or uploaded_file):
             banned_users = (
                 get_group_bans(st.session_state.current_channel)
                 if is_group
                 else []
             )
-            is_banned = st.session_state.username in banned_users
-
-            if is_banned:
-                st.error("You are banned from sending messages in this group.")
+            if st.session_state.username in banned_users:
+                st.error("You are banned from sending messages here.")
             elif st.session_state.simulate_network_error:
-                st.error(
-                    "This message has not been sent. Server or internet problem"
-                )
+                st.error("Network error: Message not sent.")
             else:
-                cleaned_text = filter_message(user_input)
+                cleaned_text = filter_message(user_input if user_input else "")
                 timestamp = datetime.now().strftime("%H:%M")
                 db_chan = get_db_channel(
                     st.session_state.username, st.session_state.current_channel
                 )
 
+                file_path = None
+                if uploaded_file:
+                    file_path = uploaded_file.name  # Simple local reference
+
                 cursor.execute(
-                    "INSERT INTO messages (channel, user, text, time) VALUES"
-                    " (?, ?, ?, ?)",
+                    "INSERT INTO messages (channel, user, text, time, file_url) VALUES (?, ?, ?, ?, ?)",
                     (
                         db_chan,
                         st.session_state.username,
                         cleaned_text,
                         timestamp,
+                        file_path,
                     ),
                 )
                 conn.commit()
