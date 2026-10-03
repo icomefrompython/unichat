@@ -17,7 +17,7 @@ st.set_page_config(
 
 # === IP RESTRICTION CONFIGURATION ===
 # Replace this with your actual public or local IP address (e.g., "192.168.1.50" or "203.0.113.5")
-MY_IP_ADDRESS = "127.0.0.1"
+MY_IP_ADDRESS = "24.24.137.252"
 
 
 def get_client_ip():
