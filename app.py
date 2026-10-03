@@ -458,7 +458,7 @@ with st.sidebar:
 
     st.markdown("---")
 
-    # Admin Broadcast Panel (Feature 4)
+    # Admin Broadcast Panel
     if st.session_state.username == "AdminMike1":
         with st.expander("📢 Send Broadcast Announcement"):
             broadcast_text = st.text_area("Broadcast Message")
@@ -677,7 +677,7 @@ with st.sidebar:
 cursor.execute("SELECT 1 FROM groups WHERE group_name = ?", (st.session_state.current_channel,))
 is_group = bool(cursor.fetchone() or st.session_state.current_channel == "General Chat")
 
-# Display Broadcast Banners (Feature 4)
+# Display Broadcast Banners
 cursor.execute("SELECT text, time FROM broadcasts ORDER BY id DESC LIMIT 1")
 latest_broadcast = cursor.fetchone()
 if latest_broadcast:
@@ -831,13 +831,13 @@ if st.session_state.in_call:
 
 st.markdown("---")
 
-# Message Search & History Filtering Bar (Feature 2)
+# Message Search & History Filtering Bar
 search_query = st.text_input(
     "🔍 Search messages in this channel...",
     placeholder="Type keyword to filter history...",
 )
 
-# Handle message edits (Feature 5)
+# Handle message edits
 if st.session_state.editing_msg_id:
     cursor.execute(
         "SELECT text FROM messages WHERE id = ?",
@@ -888,7 +888,7 @@ def live_chat_stream():
                         st.session_state.inspect_user = msg["user"]
                         st.rerun()
                 with col_msg_body:
-                    # Render attached images/files if present (Feature 1)
+                    # Render attached media/files (Images, Videos, Documents)
                     file_html = ""
                     if msg["file_url"]:
                         if any(
@@ -896,6 +896,11 @@ def live_chat_stream():
                             for ext in [".png", ".jpg", ".jpeg", ".gif"]
                         ):
                             file_html = f'<br><img src="{msg["file_url"]}" style="max-width: 300px; border-radius: 4px; margin-top: 8px;">'
+                        elif any(
+                            msg["file_url"].endswith(ext)
+                            for ext in [".mp4", ".mov", ".avi", ".mkv"]
+                        ):
+                            file_html = f'<br><video width="320" height="240" controls style="margin-top: 8px; border-radius: 4px;"><source src="{msg["file_url"]}"></video>'
                         else:
                             file_html = f'<br><a href="{msg["file_url"]}" target="_blank">📎 Download Attached File</a>'
 
@@ -910,7 +915,7 @@ def live_chat_stream():
                         unsafe_allow_html=True,
                     )
 
-                    # Message Owner Edit/Delete Actions (Feature 5)
+                    # Message Owner Edit/Delete Actions
                     if msg["user"] == st.session_state.username:
                         col_act_e, col_act_d, _ = st.columns([1, 1, 8])
                         if col_act_e.button("Edit", key=f"edit_{msg['id']}"):
@@ -923,14 +928,14 @@ def live_chat_stream():
                             conn.commit()
                             st.rerun()
 
-    # Emoji Picker (Feature 3)
+    # Emoji Picker
     selected_emoji = st.selectbox(
         "Quick Emojis",
         ["", "😀", "😂", "👍", "❤️", "🔥", "🎉", "🚀", "💡", "🙌"],
         key="emoji_picker",
     )
 
-    # Bottom Message Input & File Uploader (Features 1 & 3)
+    # Bottom Message Input & Media/File Uploader (Supports Videos!)
     with st.form(key="message_form", clear_on_submit=True):
         user_input = st.text_input(
             f"Message {st.session_state.current_channel}",
@@ -939,7 +944,8 @@ def live_chat_stream():
             label_visibility="collapsed",
         )
         uploaded_file = st.file_uploader(
-            "Attach image or file", type=["png", "jpg", "jpeg", "gif", "pdf", "txt"]
+            "Attach image, video or file",
+            type=["png", "jpg", "jpeg", "gif", "mp4", "mov", "avi", "mkv", "pdf", "txt"],
         )
         submit_btn = st.form_submit_button(label="⬆ Send")
 
