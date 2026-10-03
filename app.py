@@ -21,13 +21,14 @@ st.markdown(
     .chat-box { background-color: #161b22; padding: 12px 16px; border-radius: 6px; border: 1px solid #30363d; margin-bottom: 10px; }
     div.stButton > button { background-color: #21262d; color: #c9d1d9; border: 1px solid #30363d; text-align: left; }
     div.stButton > button:hover { background-color: #30363d; color: #ffffff; }
+    .badge { background-color: #f85149; color: white; border-radius: 10px; padding: 2px 6px; font-size: 0.75em; font-weight: bold; float: right; }
     </style>
 """,
     unsafe_allow_html=True,
 )
 
 
-# --- DATABASE SETUP (Permanent Forever Storage for Friends & Messages) ---
+# --- DATABASE SETUP (Permanent Storage with Profiles & Read Tracking) ---
 def init_db():
     conn = sqlite3.connect("unichat.db", check_same_thread=False)
     cursor = conn.cursor()
@@ -35,10 +36,27 @@ def init_db():
         """
         CREATE TABLE IF NOT EXISTS users (
             username TEXT PRIMARY KEY,
-            password TEXT
+            password TEXT,
+            bio TEXT,
+            status TEXT,
+            last_seen TEXT
         )
     """
     )
+    # Safely ensure new columns exist if table was already created previously
+    try:
+        cursor.execute("ALTER TABLE users ADD COLUMN bio TEXT")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        cursor.execute("ALTER TABLE users ADD COLUMN status TEXT")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        cursor.execute("ALTER TABLE users ADD COLUMN last_seen TEXT")
+    except sqlite3.OperationalError:
+        pass
+
     cursor.execute(
         """
         CREATE TABLE IF NOT EXISTS messages (
@@ -65,6 +83,16 @@ def init_db():
             username TEXT,
             requester TEXT,
             PRIMARY KEY (username, requester)
+        )
+    """
+    )
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS channel_reads (
+            username TEXT,
+            channel TEXT,
+            last_read_id INTEGER,
+            PRIMARY KEY (username, channel)
         )
     """
     )
@@ -116,6 +144,16 @@ if "blocked_users" not in st.session_state:
     st.session_state.blocked_users = []
 
 
+# Update user's last seen timestamp actively
+if st.session_state.authenticated and st.session_state.username:
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    cursor.execute(
+        "UPDATE users SET last_seen = ? WHERE username = ?",
+        (now_str, st.session_state.username),
+    )
+    conn.commit()
+
+
 # Helper functions
 def get_friends(username):
     cursor.execute(
@@ -141,11 +179,11 @@ def get_db_channel(user, channel):
 def get_messages(channel):
     db_chan = get_db_channel(st.session_state.username, channel)
     cursor.execute(
-        "SELECT user, text, time FROM messages WHERE channel = ? ORDER BY id ASC",
+        "SELECT id, user, text, time FROM messages WHERE channel = ? ORDER BY id ASC",
         (db_chan,),
     )
     rows = cursor.fetchall()
-    return [{"user": r[0], "text": r[1], "time": r[2]} for r in rows]
+    return [{"id": r[0], "user": r[1], "text": r[2], "time": r[3]} for r in rows]
 
 
 def get_last_message(channel):
@@ -158,6 +196,46 @@ def get_last_message(channel):
     if row:
         return f"{row[0]}: {row[1]}", row[2]
     return "No messages yet", ""
+
+
+def get_unread_count(username, channel):
+    db_chan = get_db_channel(username, channel)
+    # Get last read message ID for this user/channel
+    cursor.execute(
+        "SELECT last_read_id FROM channel_reads WHERE username = ? AND channel ="
+        " ?",
+        (username, db_chan),
+    )
+    row = cursor.fetchone()
+    last_read_id = row[0] if row else 0
+
+    # Count messages with ID greater than last read ID (excluding own messages)
+    cursor.execute(
+        "SELECT COUNT(*) FROM messages WHERE channel = ? AND id > ? AND user !="
+        " ?",
+        (db_chan, last_read_id, username),
+    )
+    count_row = cursor.fetchone()
+    return count_row[0] if count_row else 0
+
+
+def mark_channel_read(username, channel):
+    db_chan = get_db_channel(username, channel)
+    cursor.execute(
+        "SELECT MAX(id) FROM messages WHERE channel = ?", (db_chan,)
+    )
+    row = cursor.fetchone()
+    max_id = row[0] if row and row[0] else 0
+
+    cursor.execute(
+        """
+        INSERT INTO channel_reads (username, channel, last_read_id) 
+        VALUES (?, ?, ?) 
+        ON CONFLICT(username, channel) DO UPDATE SET last_read_id = ?
+    """,
+        (username, db_chan, max_id, max_id),
+    )
+    conn.commit()
 
 
 if "groups" not in st.session_state:
@@ -273,9 +351,15 @@ if not st.session_state.authenticated:
                         )
                     else:
                         cursor.execute(
-                            "INSERT INTO users (username, password) VALUES"
-                            " (?, ?)",
-                            (sign_user, hash_password(sign_pass)),
+                            "INSERT INTO users (username, password, bio, status,"
+                            " last_seen) VALUES (?, ?, ?, ?, ?)",
+                            (
+                                sign_user,
+                                hash_password(sign_pass),
+                                "Hey there! I am using Unichat.",
+                                "🟢 Online",
+                                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                            ),
                         )
                         conn.commit()
                         st.session_state.authenticated = True
@@ -303,14 +387,42 @@ with st.sidebar:
 
     st.markdown("---")
 
-    with st.expander("⚙️ Settings"):
+    with st.expander("⚙️ Settings & Profile"):
         st.session_state.safe_chat = st.checkbox(
-            "🛡️ Safe Chat Filter", value=st.session_state.safe_chat
+            "🛡️️ Safe Chat Filter", value=st.session_state.safe_chat
         )
         st.session_state.simulate_network_error = st.checkbox(
             "🔌 Simulate Server/Net Error",
             value=st.session_state.simulate_network_error,
         )
+
+        st.markdown("### Edit Profile")
+        cursor.execute(
+            "SELECT bio, status FROM users WHERE username = ?",
+            (st.session_state.username,),
+        )
+        user_row = cursor.fetchone()
+        current_bio = user_row[0] if user_row and user_row[0] else ""
+        current_status = user_row[1] if user_row and user_row[1] else "🟢 Online"
+
+        new_status = st.selectbox(
+            "My Status",
+            ["🟢 Online", "🌙 Away", "🔴 Busy", " offline"],
+            index=["🟢 Online", "🌙 Away", "🔴 Busy", " offline"].index(
+                current_status
+            )
+            if current_status
+            in ["🟢 Online", "🌙 Away", "🔴 Busy", " offline"]
+            else 0,
+        )
+        new_bio = st.text_input("My Bio / Status Message", value=current_bio)
+        if st.button("Save Profile"):
+            cursor.execute(
+                "UPDATE users SET bio = ?, status = ? WHERE username = ?",
+                (new_bio, new_status, st.session_state.username),
+            )
+            conn.commit()
+            st.success("Profile updated successfully!")
 
     st.markdown("---")
 
@@ -392,17 +504,32 @@ with st.sidebar:
 
     st.markdown("---")
 
-    # Direct Messages Section
+    # Direct Messages Section with Unread Badges & Online Indicators
     st.markdown("### 💬 Direct Messages")
     current_friends = get_friends(st.session_state.username)
     for friend in current_friends:
         if friend not in st.session_state.blocked_users:
             if search_filter.lower() in friend.lower():
                 is_active = st.session_state.current_channel == friend
-                icon = "🔴" if is_active else "⚪"
+                unread = get_unread_count(st.session_state.username, friend)
+
+                # Fetch friend's status indicator
+                cursor.execute(
+                    "SELECT status FROM users WHERE username = ?", (friend,)
+                )
+                f_row = cursor.fetchone()
+                f_status = (
+                    f_row[0].split()[0]
+                    if f_row and f_row[0]
+                    else "🟢"
+                )
+
+                icon = "🔴" if is_active else f_status
                 last_msg, last_time = get_last_message(friend)
+                badge_html = f'<span class="badge">{unread}</span>' if unread > 0 else ""
+                
                 button_label = (
-                    f"{icon} {friend}\n\n💬 {last_msg} ({last_time})"
+                    f"{icon} {friend} {unread if unread > 0 else ''}\n\n💬 {last_msg} ({last_time})"
                     if last_time
                     else f"{icon} {friend}\n\n💬 No messages yet"
                 )
@@ -410,6 +537,7 @@ with st.sidebar:
                     button_label, key=f"dm_{friend}", use_container_width=True
                 ):
                     st.session_state.current_channel = friend
+                    mark_channel_read(st.session_state.username, friend)
                     st.rerun()
 
     st.markdown("---")
@@ -420,8 +548,10 @@ with st.sidebar:
         if group not in st.session_state.blocked_users:
             if search_filter.lower() in group.lower():
                 is_active = st.session_state.current_channel == group
+                unread = get_unread_count(st.session_state.username, group)
                 icon = "🔴" if is_active else "⚪"
                 last_msg, last_time = get_last_message(group)
+                
                 button_label = (
                     f"{icon} #{group}\n\n💬 {last_msg} ({last_time})"
                     if last_time
@@ -431,6 +561,7 @@ with st.sidebar:
                     button_label, key=f"grp_{group}", use_container_width=True
                 ):
                     st.session_state.current_channel = group
+                    mark_channel_read(st.session_state.username, group)
                     st.rerun()
 
 # --- MAIN CONTENT AREA ---
@@ -438,10 +569,18 @@ st.title(
     f"{'#' if st.session_state.current_channel in st.session_state.groups else '💬'} {st.session_state.current_channel}"
 )
 
-# User Profile Card Inspector Overlay
+# User Profile Card Inspector Overlay (Shows Bio, Status, and Last Seen)
 if st.session_state.inspect_user:
     u = st.session_state.inspect_user
-    st.info(f"Inspecting Profile: **{u}**")
+    cursor.execute(
+        "SELECT bio, status, last_seen FROM users WHERE username = ?", (u,)
+    )
+    u_info = cursor.fetchone()
+    u_bio = u_info[0] if u_info and u_info[0] else "No bio provided."
+    u_status = u_info[1] if u_info and u_info[1] else "🟢 Online"
+    u_last_seen = u_info[2] if u_info and u_info[2] else "Unknown"
+
+    st.info(f"### Profile: **{u}**\n* **Status**: {u_status}\n* **Bio**: {u_bio}\n* **Last Seen**: {u_last_seen}")
 
     if u == st.session_state.username:
         st.warning("This is your own profile account.")
@@ -544,6 +683,9 @@ st.markdown("---")
 # --- FAST LIVE MESSAGING CONTAINER (Auto-polls every 2 seconds) ---
 @st.fragment(run_every=2)
 def live_chat_stream():
+    # Automatically mark current channel messages as read while viewing
+    mark_channel_read(st.session_state.username, st.session_state.current_channel)
+
     chat_container = st.container()
     with chat_container:
         channel_msgs = get_messages(st.session_state.current_channel)
@@ -614,6 +756,9 @@ def live_chat_stream():
                     ),
                 )
                 conn.commit()
+                mark_channel_read(
+                    st.session_state.username, st.session_state.current_channel
+                )
                 st.rerun()
 
 
