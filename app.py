@@ -43,7 +43,6 @@ def init_db():
         )
     """
     )
-    # Safely ensure new columns exist if table was already created previously
     try:
         cursor.execute("ALTER TABLE users ADD COLUMN bio TEXT")
     except sqlite3.OperationalError:
@@ -200,7 +199,6 @@ def get_last_message(channel):
 
 def get_unread_count(username, channel):
     db_chan = get_db_channel(username, channel)
-    # Get last read message ID for this user/channel
     cursor.execute(
         "SELECT last_read_id FROM channel_reads WHERE username = ? AND channel ="
         " ?",
@@ -209,7 +207,6 @@ def get_unread_count(username, channel):
     row = cursor.fetchone()
     last_read_id = row[0] if row else 0
 
-    # Count messages with ID greater than last read ID (excluding own messages)
     cursor.execute(
         "SELECT COUNT(*) FROM messages WHERE channel = ? AND id > ? AND user !="
         " ?",
@@ -389,7 +386,7 @@ with st.sidebar:
 
     with st.expander("⚙️ Settings & Profile"):
         st.session_state.safe_chat = st.checkbox(
-            "🛡️️ Safe Chat Filter", value=st.session_state.safe_chat
+            "🛡 Safe Chat Filter", value=st.session_state.safe_chat
         )
         st.session_state.simulate_network_error = st.checkbox(
             "🔌 Simulate Server/Net Error",
@@ -513,7 +510,6 @@ with st.sidebar:
                 is_active = st.session_state.current_channel == friend
                 unread = get_unread_count(st.session_state.username, friend)
 
-                # Fetch friend's status indicator
                 cursor.execute(
                     "SELECT status FROM users WHERE username = ?", (friend,)
                 )
@@ -526,8 +522,7 @@ with st.sidebar:
 
                 icon = "🔴" if is_active else f_status
                 last_msg, last_time = get_last_message(friend)
-                badge_html = f'<span class="badge">{unread}</span>' if unread > 0 else ""
-                
+
                 button_label = (
                     f"{icon} {friend} {unread if unread > 0 else ''}\n\n💬 {last_msg} ({last_time})"
                     if last_time
@@ -551,7 +546,7 @@ with st.sidebar:
                 unread = get_unread_count(st.session_state.username, group)
                 icon = "🔴" if is_active else "⚪"
                 last_msg, last_time = get_last_message(group)
-                
+
                 button_label = (
                     f"{icon} #{group}\n\n💬 {last_msg} ({last_time})"
                     if last_time
@@ -565,11 +560,12 @@ with st.sidebar:
                     st.rerun()
 
 # --- MAIN CONTENT AREA ---
+is_group = st.session_state.current_channel in st.session_state.groups
 st.title(
-    f"{'#' if st.session_state.current_channel in st.session_state.groups else '💬'} {st.session_state.current_channel}"
+    f"{'#' if is_group else '💬'} {st.session_state.current_channel}"
 )
 
-# User Profile Card Inspector Overlay (Shows Bio, Status, and Last Seen)
+# User Profile Card Inspector Overlay
 if st.session_state.inspect_user:
     u = st.session_state.inspect_user
     cursor.execute(
@@ -580,7 +576,10 @@ if st.session_state.inspect_user:
     u_status = u_info[1] if u_info and u_info[1] else "🟢 Online"
     u_last_seen = u_info[2] if u_info and u_info[2] else "Unknown"
 
-    st.info(f"### Profile: **{u}**\n* **Status**: {u_status}\n* **Bio**: {u_bio}\n* **Last Seen**: {u_last_seen}")
+    st.info(
+        f"### Profile: **{u}**\n* **Status**: {u_status}\n* **Bio**: {u_bio}\n*"
+        f" **Last Seen**: {u_last_seen}"
+    )
 
     if u == st.session_state.username:
         st.warning("This is your own profile account.")
@@ -613,12 +612,17 @@ if st.session_state.inspect_user:
             st.rerun()
     st.markdown("---")
 
-# Action buttons row
-col_btn1, col_btn2, col_spacer = st.columns([1, 1, 4])
+# Action buttons row (Includes "View Profile" button when in a DM channel)
+col_btn1, col_btn2, col_btn3, col_spacer = st.columns([1, 1, 1, 3])
 with col_btn1:
     if st.button("📞 Start Call"):
         st.session_state.in_call = True
 with col_btn2:
+    if not is_group:
+        if st.button("👤 View Profile"):
+            st.session_state.inspect_user = st.session_state.current_channel
+            st.rerun()
+with col_btn3:
     if st.button("⚙️ Settings"):
         st.info("Settings panel active.")
 
@@ -683,7 +687,6 @@ st.markdown("---")
 # --- FAST LIVE MESSAGING CONTAINER (Auto-polls every 2 seconds) ---
 @st.fragment(run_every=2)
 def live_chat_stream():
-    # Automatically mark current channel messages as read while viewing
     mark_channel_read(st.session_state.username, st.session_state.current_channel)
 
     chat_container = st.container()
