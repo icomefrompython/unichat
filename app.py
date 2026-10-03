@@ -28,7 +28,7 @@ st.markdown(
 )
 
 
-# --- DATABASE SETUP (Permanent Storage with Profiles & Read Tracking) ---
+# --- DATABASE SETUP (Permanent Storage for Profiles, Groups & Read Tracking) ---
 def init_db():
     conn = sqlite3.connect("unichat.db", check_same_thread=False)
     cursor = conn.cursor()
@@ -43,18 +43,15 @@ def init_db():
         )
     """
     )
-    try:
-        cursor.execute("ALTER TABLE users ADD COLUMN bio TEXT")
-    except sqlite3.OperationalError:
-        pass
-    try:
-        cursor.execute("ALTER TABLE users ADD COLUMN status TEXT")
-    except sqlite3.OperationalError:
-        pass
-    try:
-        cursor.execute("ALTER TABLE users ADD COLUMN last_seen TEXT")
-    except sqlite3.OperationalError:
-        pass
+    for col, col_type in [
+        ("bio", "TEXT"),
+        ("status", "TEXT"),
+        ("last_seen", "TEXT"),
+    ]:
+        try:
+            cursor.execute(f"ALTER TABLE users ADD COLUMN {col} {col_type}")
+        except sqlite3.OperationalError:
+            pass
 
     cursor.execute(
         """
@@ -92,6 +89,32 @@ def init_db():
             channel TEXT,
             last_read_id INTEGER,
             PRIMARY KEY (username, channel)
+        )
+    """
+    )
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS groups (
+            group_name TEXT PRIMARY KEY,
+            owner TEXT
+        )
+    """
+    )
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS group_members (
+            group_name TEXT,
+            username TEXT,
+            PRIMARY KEY (group_name, username)
+        )
+    """
+    )
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS group_bans (
+            group_name TEXT,
+            username TEXT,
+            PRIMARY KEY (group_name, username)
         )
     """
     )
@@ -139,8 +162,18 @@ if "cam_off" not in st.session_state:
 if "inspect_user" not in st.session_state:
     st.session_state.inspect_user = None
 
+if "inspect_group" not in st.session_state:
+    st.session_state.inspect_group = False
+
 if "blocked_users" not in st.session_state:
     st.session_state.blocked_users = []
+
+# Ensure default General Chat group exists
+cursor.execute(
+    "INSERT OR IGNORE INTO groups (group_name, owner) VALUES (?, ?)",
+    ("General Chat", "System"),
+)
+conn.commit()
 
 
 # Update user's last seen timestamp actively
@@ -168,9 +201,53 @@ def get_requests(username):
     return [row[0] for row in cursor.fetchall()]
 
 
+def get_all_groups(username):
+    cursor.execute("SELECT group_name, owner FROM groups")
+    all_g = cursor.fetchall()
+    valid_groups = []
+    for g_name, owner in all_g:
+        if g_name == "General Chat":
+            valid_groups.append(g_name)
+        else:
+            # Check if user is owner or member
+            if owner == username:
+                valid_groups.append(g_name)
+            else:
+                cursor.execute(
+                    "SELECT 1 FROM group_members WHERE group_name = ? AND username = ?",
+                    (g_name, username),
+                )
+                if cursor.fetchone():
+                    valid_groups.append(g_name)
+    return valid_groups
+
+
+def get_group_owner(group_name):
+    cursor.execute(
+        "SELECT owner FROM groups WHERE group_name = ?", (group_name,)
+    )
+    row = cursor.fetchone()
+    return row[0] if row else ""
+
+
+def get_group_members(group_name):
+    cursor.execute(
+        "SELECT username FROM group_members WHERE group_name = ?", (group_name,)
+    )
+    return [row[0] for row in cursor.fetchall()]
+
+
+def get_group_bans(group_name):
+    cursor.execute(
+        "SELECT username FROM group_bans WHERE group_name = ?", (group_name,)
+    )
+    return [row[0] for row in cursor.fetchall()]
+
+
 def get_db_channel(user, channel):
-    """Maps DMs to a clean, shared background channel safely."""
-    if channel in st.session_state.groups:
+    """Maps DMs and Groups to a clean, shared background channel safely."""
+    cursor.execute("SELECT 1 FROM groups WHERE group_name = ?", (channel,))
+    if cursor.fetchone() or channel == "General Chat":
         return channel
     return f"dm_{'_'.join(sorted([user, channel]))}"
 
@@ -234,11 +311,6 @@ def mark_channel_read(username, channel):
     )
     conn.commit()
 
-
-if "groups" not in st.session_state:
-    st.session_state.groups = {
-        "General Chat": {"owner": "System", "members": [], "banned": []}
-    }
 
 BAD_WORDS = [
     "shit",
@@ -372,7 +444,7 @@ if not st.session_state.authenticated:
 with st.sidebar:
     col_avatar, col_info = st.columns([1, 3])
     with col_avatar:
-        st.markdown("### 🅰️")
+        st.markdown("### 🅰️️")
     with col_info:
         st.markdown(f"**{st.session_state.username}**")
         if st.button("Logout", key="logout_btn"):
@@ -457,6 +529,34 @@ with st.sidebar:
             else:
                 st.error("Please enter a valid username other than your own.")
 
+    # Create Group Chat Expander
+    with st.expander("➕ Create Group Chat"):
+        new_g_name = st.text_input("Group Name", placeholder="e.g. ProjectTeam")
+        if st.button("Create Group"):
+            new_g_name = new_g_name.strip()
+            if not new_g_name:
+                st.error("Please enter a group name.")
+            else:
+                cursor.execute(
+                    "SELECT 1 FROM groups WHERE group_name = ?", (new_g_name,)
+                )
+                if cursor.fetchone():
+                    st.error("A group with this name already exists.")
+                else:
+                    cursor.execute(
+                        "INSERT INTO groups (group_name, owner) VALUES (?, ?)",
+                        (new_g_name, st.session_state.username),
+                    )
+                    cursor.execute(
+                        "INSERT OR IGNORE INTO group_members (group_name,"
+                        " username) VALUES (?, ?)",
+                        (new_g_name, st.session_state.username),
+                    )
+                    conn.commit()
+                    st.success(f"Group #{new_g_name} created!")
+                    st.session_state.current_channel = new_g_name
+                    st.rerun()
+
     current_requests = get_requests(st.session_state.username)
     with st.expander(f"🔔 Connection Requests ({len(current_requests)})"):
         if not current_requests:
@@ -539,7 +639,8 @@ with st.sidebar:
 
     # Group Chats Section
     st.markdown("### 🏢 Group Chats")
-    for group in st.session_state.groups:
+    my_groups = get_all_groups(st.session_state.username)
+    for group in my_groups:
         if group not in st.session_state.blocked_users:
             if search_filter.lower() in group.lower():
                 is_active = st.session_state.current_channel == group
@@ -560,7 +661,9 @@ with st.sidebar:
                     st.rerun()
 
 # --- MAIN CONTENT AREA ---
-is_group = st.session_state.current_channel in st.session_state.groups
+cursor.execute("SELECT 1 FROM groups WHERE group_name = ?", (st.session_state.current_channel,))
+is_group = bool(cursor.fetchone() or st.session_state.current_channel == "General Chat")
+
 st.title(
     f"{'#' if is_group else '💬'} {st.session_state.current_channel}"
 )
@@ -612,7 +715,37 @@ if st.session_state.inspect_user:
             st.rerun()
     st.markdown("---")
 
-# Action buttons row (Includes "View Profile" button when in a DM channel)
+# Group Settings Inspector Overlay
+if st.session_state.inspect_group and is_group:
+    g_name = st.session_state.current_channel
+    g_owner = get_group_owner(g_name)
+    g_members = get_group_members(g_name)
+    g_bans = get_group_bans(g_name)
+
+    st.info(
+        f"### Group Settings: **#{g_name}**\n* **Owner**: {g_owner}\n* **Members**: {', '.join(g_members) if g_members else 'None'}"
+    )
+
+    if g_owner == st.session_state.username and g_name != "General Chat":
+        st.markdown("#### Manage Members")
+        add_mem = st.text_input("Add username to group")
+        if st.button("Add Member"):
+            add_mem = add_mem.strip()
+            if add_mem:
+                cursor.execute(
+                    "INSERT OR IGNORE INTO group_members (group_name, username) VALUES (?, ?)",
+                    (g_name, add_mem),
+                )
+                conn.commit()
+                st.success(f"Added {add_mem} to #{g_name}!")
+                st.rerun()
+
+    if st.button("Close Group Settings"):
+        st.session_state.inspect_group = False
+        st.rerun()
+    st.markdown("---")
+
+# Action buttons row
 col_btn1, col_btn2, col_btn3, col_spacer = st.columns([1, 1, 1, 3])
 with col_btn1:
     if st.button("📞 Start Call"):
@@ -621,6 +754,10 @@ with col_btn2:
     if not is_group:
         if st.button("👤 View Profile"):
             st.session_state.inspect_user = st.session_state.current_channel
+            st.rerun()
+    else:
+        if st.button("🏢 Group Settings"):
+            st.session_state.inspect_group = not st.session_state.inspect_group
             st.rerun()
 with col_btn3:
     if st.button("⚙️ Settings"):
@@ -727,13 +864,12 @@ def live_chat_stream():
         submit_btn = st.form_submit_button(label="⬆ Send")
 
         if submit_btn and user_input:
-            curr_group = st.session_state.groups.get(
-                st.session_state.current_channel
+            banned_users = (
+                get_group_bans(st.session_state.current_channel)
+                if is_group
+                else []
             )
-            is_banned = (
-                curr_group
-                and st.session_state.username in curr_group.get("banned", [])
-            )
+            is_banned = st.session_state.username in banned_users
 
             if is_banned:
                 st.error("You are banned from sending messages in this group.")
