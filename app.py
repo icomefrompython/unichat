@@ -17,10 +17,13 @@ st.set_page_config(
 
 def get_client_ip():
     try:
-        # Safe fallback for cloud/local environments
-        return "127.0.0.1"
+        # Use modern Streamlit context IP detection
+        ip = st.context.ip_address
+        if ip:
+            return ip
     except Exception:
-        return "127.0.0.1"
+        pass
+    return "127.0.0.1"
 
 
 # Custom CSS
@@ -40,7 +43,7 @@ st.markdown(
 )
 
 
-# --- DATABASE SETUP (With Dynamic IP Config Storage) ---
+# --- DATABASE SETUP ---
 def init_db():
     conn = sqlite3.connect("unichat.db", check_same_thread=False)
     cursor = conn.cursor()
@@ -204,19 +207,17 @@ def generate_random_suffix(length=20):
     )
 
 
-# --- INITIAL SETUP WIZARD IF NO OWNER IP IS CONFIGURED YET ---
+# --- INITIAL SETUP WIZARD (Shows your currently detected IP automatically) ---
 saved_owner_ip = get_saved_owner_ip()
+current_detected_ip = get_client_ip()
+
 if not saved_owner_ip:
     st.title("🛡️ Unichat Security Setup")
-    st.markdown(
-        "Welcome! Since this is a fresh setup, please specify your authorized"
-        " IP address to restrict account creations."
-    )
+    st.info(f"🔍 **Detected IP Address for your browser:** `{current_detected_ip}`")
     with st.form("setup_ip_form"):
         input_ip = st.text_input(
-            "Your Authorized IP Address",
-            value="127.0.0.1",
-            placeholder="e.g. 192.168.1.50",
+            "Confirm or Enter your Authorized IP Address",
+            value=current_detected_ip if current_detected_ip else "127.0.0.1",
         )
         setup_btn = st.form_submit_button("Save & Continue")
         if setup_btn:
@@ -503,9 +504,9 @@ if not st.session_state.authenticated:
                             )
                             conn.commit()
                             st.error(
-                                "⚠️ Unrecognized IP address! A login access"
-                                " request has been sent to the account owner"
-                                " for approval."
+                                f"⚠️ Unrecognized IP address ({current_ip})! A"
+                                " login access request has been sent to the"
+                                " account owner for approval."
                             )
                     else:
                         st.error("Invalid username or password.")
@@ -513,6 +514,11 @@ if not st.session_state.authenticated:
     with auth_tab2:
         client_ip = get_client_ip()
         owner_ip = get_saved_owner_ip()
+
+        st.caption(
+            f"Your current detected IP: `{client_ip}` | Authorized Owner IP:"
+            f" `{owner_ip}`"
+        )
 
         with st.form("signup_form"):
             sign_user = st.text_input("Choose a Base Username").strip()
@@ -526,8 +532,8 @@ if not st.session_state.authenticated:
             if sign_btn:
                 if client_ip != owner_ip:
                     st.error(
-                        f"Access Denied: Your IP ({client_ip}) is not authorized"
-                        " to register new accounts."
+                        f"Access Denied: Your IP ({client_ip}) does not match"
+                        f" the authorized owner IP ({owner_ip})."
                     )
                 else:
                     sign_user = sign_user.strip()
@@ -651,6 +657,17 @@ with st.sidebar:
             st.rerun()
 
     st.markdown("---")
+
+    # Option in sidebar to reset saved owner IP if locked out
+    with st.expander("🛠️ Admin Security Settings"):
+        st.write(f"Current IP: `{get_client_ip()}`")
+        st.write(f"Saved Owner IP: `{get_saved_owner_ip()}`")
+        new_override_ip = st.text_input("Update Authorized Owner IP")
+        if st.button("Save New IP"):
+            if new_override_ip.strip():
+                save_owner_ip(new_override_ip.strip())
+                st.success("Owner IP updated!")
+                st.rerun()
 
     cursor.execute(
         "SELECT id, ip FROM login_requests WHERE username = ?",
