@@ -16,14 +16,15 @@ st.set_page_config(
 
 # === HARDCODED OWNER IP CONFIGURATION ===
 # Replace "YOUR_IP_HERE" with your actual IP address (e.g., "192.168.1.50" or your public IP)
-24.24.137.252 = "YOUR_IP_HERE"
+OWNER_IP_ADDRESS = "YOUR_IP_HERE"
 
 
 def get_client_ip():
     try:
-        ip = st.context.ip_address
-        if ip:
-            return ip
+        if hasattr(st, "context") and hasattr(st.context, "ip_address"):
+            ip = st.context.ip_address
+            if ip:
+                return ip
     except Exception:
         pass
     return "127.0.0.1"
