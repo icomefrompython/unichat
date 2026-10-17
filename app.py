@@ -14,10 +14,6 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# === HARDCODED OWNER IP CONFIGURATION ===
-# Replace "YOUR_IP_HERE" with your actual IP address (e.g., "192.168.1.50" or your public IP)
-OWNER_IP_ADDRESS = "YOUR_IP_HERE"
-
 
 def get_client_ip():
     try:
@@ -403,7 +399,7 @@ def filter_message(text):
 # --- AUTHENTICATION SCREEN ---
 if not st.session_state.authenticated:
     st.title("💬 Welcome to Unichat")
-    st.markdown("Please log in or recover your account below.")
+    st.markdown("Please log in or create an account to start chatting.")
 
     auth_tab1, auth_tab2, auth_tab3 = st.tabs(
         ["🔑 Login", "📝 Sign Up", "❓ Forgot Details"]
@@ -483,53 +479,43 @@ if not st.session_state.authenticated:
             sign_btn = st.form_submit_button("Sign Up")
 
             if sign_btn:
-                if client_ip != OWNER_IP_ADDRESS:
-                    st.error(
-                        "Access Denied: Your IP is not authorized to register"
-                        " new accounts."
-                    )
+                sign_user = sign_user.strip()
+                if not sign_user or not sign_pass or not sign_email:
+                    st.error("Please fill in all fields.")
+                elif sign_user.lower() == "adminmike1":
+                    st.error("The username 'AdminMike1' is reserved.")
+                elif len(sign_user) < 3:
+                    st.error("Username must be at least 3 characters long.")
                 else:
-                    sign_user = sign_user.strip()
-                    if not sign_user or not sign_pass or not sign_email:
-                        st.error("Please fill in all fields.")
-                    elif sign_user.lower() == "adminmike1":
-                        st.error("The username 'AdminMike1' is reserved.")
-                    elif len(sign_user) < 3:
-                        st.error(
-                            "Username must be at least 3 characters long."
-                        )
-                    else:
-                        unique_handle = (
-                            f"{sign_user}_{generate_random_suffix(24)}"
-                        )
+                    unique_handle = f"{sign_user}_{generate_random_suffix(24)}"
 
-                        cursor.execute(
-                            "INSERT INTO users (username, password, bio, status,"
-                            " last_seen, email) VALUES (?, ?, ?, ?, ?, ?)",
-                            (
-                                unique_handle,
-                                hash_password(sign_pass),
-                                "Hey there! I am using Unichat.",
-                                "🟢 Online",
-                                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                                sign_email,
-                            ),
-                        )
-                        cursor.execute(
-                            "INSERT OR IGNORE INTO trusted_ips (username, ip)"
-                            " VALUES (?, ?)",
-                            (unique_handle, client_ip),
-                        )
-                        conn.commit()
-                        st.session_state.authenticated = True
-                        st.session_state.username = unique_handle
-                        if remember_signup:
-                            st.query_params["user"] = unique_handle
-                        st.success(
-                            f"Account created successfully! Your full handle is:"
-                            f" {unique_handle}"
-                        )
-                        st.rerun()
+                    cursor.execute(
+                        "INSERT INTO users (username, password, bio, status,"
+                        " last_seen, email) VALUES (?, ?, ?, ?, ?, ?)",
+                        (
+                            unique_handle,
+                            hash_password(sign_pass),
+                            "Hey there! I am using Unichat.",
+                            "🟢 Online",
+                            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                            sign_email,
+                        ),
+                    )
+                    cursor.execute(
+                        "INSERT OR IGNORE INTO trusted_ips (username, ip)"
+                        " VALUES (?, ?)",
+                        (unique_handle, client_ip),
+                    )
+                    conn.commit()
+                    st.session_state.authenticated = True
+                    st.session_state.username = unique_handle
+                    if remember_signup:
+                        st.query_params["user"] = unique_handle
+                    st.success(
+                        f"Account created successfully! Your full handle is:"
+                        f" {unique_handle}"
+                    )
+                    st.rerun()
 
     with auth_tab3:
         st.markdown("### Recover Account")
