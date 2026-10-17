@@ -14,10 +14,13 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
+# === HARDCODED OWNER IP CONFIGURATION ===
+# Replace "YOUR_IP_HERE" with your actual IP address (e.g., "192.168.1.50" or your public IP)
+OWNER_IP_ADDRESS = "YOUR_IP_HERE"
+
 
 def get_client_ip():
     try:
-        # Use modern Streamlit context IP detection
         ip = st.context.ip_address
         if ip:
             return ip
@@ -47,14 +50,6 @@ st.markdown(
 def init_db():
     conn = sqlite3.connect("unichat.db", check_same_thread=False)
     cursor = conn.cursor()
-    cursor.execute(
-        """
-        CREATE TABLE IF NOT EXISTS app_config (
-            key TEXT PRIMARY KEY,
-            value TEXT
-        )
-    """
-    )
     cursor.execute(
         """
         CREATE TABLE IF NOT EXISTS users (
@@ -183,20 +178,6 @@ def init_db():
 conn, cursor = init_db()
 
 
-def get_saved_owner_ip():
-    cursor.execute("SELECT value FROM app_config WHERE key = 'owner_ip'")
-    row = cursor.fetchone()
-    return row[0] if row else None
-
-
-def save_owner_ip(ip):
-    cursor.execute(
-        "INSERT OR REPLACE INTO app_config (key, value) VALUES ('owner_ip', ?)",
-        (ip,),
-    )
-    conn.commit()
-
-
 def hash_password(password):
     return hashlib.sha256(password.encode()).hexdigest()
 
@@ -205,29 +186,6 @@ def generate_random_suffix(length=20):
     return "".join(
         random.choices(string.ascii_letters + string.digits, k=length)
     )
-
-
-# --- INITIAL SETUP WIZARD (Shows your currently detected IP automatically) ---
-saved_owner_ip = get_saved_owner_ip()
-current_detected_ip = get_client_ip()
-
-if not saved_owner_ip:
-    st.title("🛡️ Unichat Security Setup")
-    st.info(f"🔍 **Detected IP Address for your browser:** `{current_detected_ip}`")
-    with st.form("setup_ip_form"):
-        input_ip = st.text_input(
-            "Confirm or Enter your Authorized IP Address",
-            value=current_detected_ip if current_detected_ip else "127.0.0.1",
-        )
-        setup_btn = st.form_submit_button("Save & Continue")
-        if setup_btn:
-            if input_ip.strip():
-                save_owner_ip(input_ip.strip())
-                st.success("IP configuration saved successfully!")
-                st.rerun()
-            else:
-                st.error("Please enter a valid IP address.")
-    st.stop()
 
 
 # --- PERSISTENT SESSION HANDLING ---
@@ -504,21 +462,15 @@ if not st.session_state.authenticated:
                             )
                             conn.commit()
                             st.error(
-                                f"⚠️ Unrecognized IP address ({current_ip})! A"
-                                " login access request has been sent to the"
-                                " account owner for approval."
+                                "⚠️ Unrecognized IP address! A login access"
+                                " request has been sent to the account owner"
+                                " for approval."
                             )
                     else:
                         st.error("Invalid username or password.")
 
     with auth_tab2:
         client_ip = get_client_ip()
-        owner_ip = get_saved_owner_ip()
-
-        st.caption(
-            f"Your current detected IP: `{client_ip}` | Authorized Owner IP:"
-            f" `{owner_ip}`"
-        )
 
         with st.form("signup_form"):
             sign_user = st.text_input("Choose a Base Username").strip()
@@ -530,10 +482,10 @@ if not st.session_state.authenticated:
             sign_btn = st.form_submit_button("Sign Up")
 
             if sign_btn:
-                if client_ip != owner_ip:
+                if client_ip != OWNER_IP_ADDRESS:
                     st.error(
-                        f"Access Denied: Your IP ({client_ip}) does not match"
-                        f" the authorized owner IP ({owner_ip})."
+                        "Access Denied: Your IP is not authorized to register"
+                        " new accounts."
                     )
                 else:
                     sign_user = sign_user.strip()
@@ -657,17 +609,6 @@ with st.sidebar:
             st.rerun()
 
     st.markdown("---")
-
-    # Option in sidebar to reset saved owner IP if locked out
-    with st.expander("🛠️ Admin Security Settings"):
-        st.write(f"Current IP: `{get_client_ip()}`")
-        st.write(f"Saved Owner IP: `{get_saved_owner_ip()}`")
-        new_override_ip = st.text_input("Update Authorized Owner IP")
-        if st.button("Save New IP"):
-            if new_override_ip.strip():
-                save_owner_ip(new_override_ip.strip())
-                st.success("Owner IP updated!")
-                st.rerun()
 
     cursor.execute(
         "SELECT id, ip FROM login_requests WHERE username = ?",
