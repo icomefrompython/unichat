@@ -14,13 +14,16 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# === IP RESTRICTION CONFIGURATION ===
+# === IP RESTRICTION & IDENTIFICATION CONFIGURATION ===
 MY_IP_ADDRESS = "127.0.0.1"
 
 
 def get_client_ip():
-    # Safe fallback for cloud environments without direct socket header access
-    return "127.0.0.1"
+    try:
+        # Fallback helper for local vs cloud environments
+        return "127.0.0.1"
+    except Exception:
+        return "127.0.0.1"
 
 
 # Custom CSS
@@ -51,7 +54,8 @@ def init_db():
             password TEXT,
             bio TEXT,
             status TEXT,
-            last_seen TEXT
+            last_seen TEXT,
+            email TEXT
         )
     """
     )
@@ -59,12 +63,31 @@ def init_db():
         ("bio", "TEXT"),
         ("status", "TEXT"),
         ("last_seen", "TEXT"),
+        ("email", "TEXT"),
     ]:
         try:
             cursor.execute(f"ALTER TABLE users ADD COLUMN {col} {col_type}")
         except sqlite3.OperationalError:
             pass
 
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS trusted_ips (
+            username TEXT,
+            ip TEXT,
+            PRIMARY KEY (username, ip)
+        )
+    """
+    )
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS login_requests (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT,
+            ip TEXT
+        )
+    """
+    )
     cursor.execute(
         """
         CREATE TABLE IF NOT EXISTS messages (
@@ -376,13 +399,15 @@ def filter_message(text):
 # --- AUTHENTICATION SCREEN ---
 if not st.session_state.authenticated:
     st.title("💬 Welcome to Unichat")
-    st.markdown("Please log in or create an account to start chatting securely.")
+    st.markdown("Please log in or recover your account below.")
 
-    auth_tab1, auth_tab2 = st.tabs(["🔑 Login", "📝 Sign Up"])
+    auth_tab1, auth_tab2, auth_tab3 = st.tabs(
+        ["🔑 Login", "📝 Sign Up", "❓ Forgot Details"]
+    )
 
     with auth_tab1:
         with st.form("login_form"):
-            log_user = st.text_input("Username").strip()
+            log_user = st.text_input("Full Username (with suffix)").strip()
             log_pass = st.text_input("Password", type="password")
             remember_me = st.checkbox("Remember Me", value=True)
             log_btn = st.form_submit_button("Log In")
@@ -404,18 +429,51 @@ if not st.session_state.authenticated:
                     )
                     row = cursor.fetchone()
                     if row and row[0] == hash_password(log_pass):
-                        st.session_state.authenticated = True
-                        st.session_state.username = log_user
-                        if remember_me:
-                            st.query_params["user"] = log_user
-                        st.success("Logged in successfully!")
-                        st.rerun()
+                        current_ip = get_client_ip()
+
+                        # Check if IP is trusted for this account
+                        cursor.execute(
+                            "SELECT 1 FROM trusted_ips WHERE username = ? AND ip = ?",
+                            (log_user, current_ip),
+                        )
+                        is_trusted = cursor.fetchone()
+
+                        if is_trusted or not cursor.execute(
+                            "SELECT 1 FROM trusted_ips WHERE username = ?",
+                            (log_user,),
+                        ).fetchone():
+                            # If trusted or first time device check, authorize login and trust IP
+                            cursor.execute(
+                                "INSERT OR IGNORE INTO trusted_ips (username, ip) VALUES (?, ?)",
+                                (log_user, current_ip),
+                            )
+                            conn.commit()
+                            st.session_state.authenticated = True
+                            st.session_state.username = log_user
+                            if remember_me:
+                                st.query_params["user"] = log_user
+                            st.success("Logged in successfully!")
+                            st.rerun()
+                        else:
+                            # Log IP access attempt request
+                            cursor.execute(
+                                "INSERT INTO login_requests (username, ip) VALUES (?, ?)",
+                                (log_user, current_ip),
+                            )
+                            conn.commit()
+                            st.error(
+                                "⚠️ Unrecognized IP address! A login access"
+                                " request has been sent to the account owner"
+                                " for approval."
+                            )
                     else:
                         st.error("Invalid username or password.")
 
     with auth_tab2:
+        client_ip = get_client_ip()
         with st.form("signup_form"):
             sign_user = st.text_input("Choose a Base Username").strip()
+            sign_email = st.text_input("Email Address").strip()
             sign_pass = st.text_input("Choose a Password", type="password")
             remember_signup = st.checkbox(
                 "Remember Me", value=True, key="signup_rem"
@@ -423,38 +481,115 @@ if not st.session_state.authenticated:
             sign_btn = st.form_submit_button("Sign Up")
 
             if sign_btn:
-                sign_user = sign_user.strip()
-                if not sign_user or not sign_pass:
-                    st.error("Please fill in all fields.")
-                elif sign_user.lower() == "adminmike1":
-                    st.error("The username 'AdminMike1' is reserved.")
-                elif len(sign_user) < 3:
-                    st.error("Username must be at least 3 characters long.")
+                if client_ip != MY_IP_ADDRESS:
+                    st.error(
+                        f"Access Denied: Your IP ({client_ip}) is not authorized"
+                        " to register new accounts."
+                    )
                 else:
-                    unique_handle = (
-                        f"{sign_user}_{generate_random_suffix(24)}"
-                    )
+                    sign_user = sign_user.strip()
+                    if not sign_user or not sign_pass or not sign_email:
+                        st.error("Please fill in all fields.")
+                    elif sign_user.lower() == "adminmike1":
+                        st.error("The username 'AdminMike1' is reserved.")
+                    elif len(sign_user) < 3:
+                        st.error(
+                            "Username must be at least 3 characters long."
+                        )
+                    else:
+                        unique_handle = (
+                            f"{sign_user}_{generate_random_suffix(24)}"
+                        )
 
+                        cursor.execute(
+                            "INSERT INTO users (username, password, bio, status,"
+                            " last_seen, email) VALUES (?, ?, ?, ?, ?, ?)",
+                            (
+                                unique_handle,
+                                hash_password(sign_pass),
+                                "Hey there! I am using Unichat.",
+                                "🟢 Online",
+                                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                sign_email,
+                            ),
+                        )
+                        cursor.execute(
+                            "INSERT OR IGNORE INTO trusted_ips (username, ip)"
+                            " VALUES (?, ?)",
+                            (unique_handle, client_ip),
+                        )
+                        conn.commit()
+                        st.session_state.authenticated = True
+                        st.session_state.username = unique_handle
+                        if remember_signup:
+                            st.query_params["user"] = unique_handle
+                        st.success(
+                            f"Account created successfully! Your full handle is:"
+                            f" {unique_handle}"
+                        )
+                        st.rerun()
+
+    with auth_tab3:
+        st.markdown("### Recover Account")
+        recovery_choice = st.radio(
+            "What do you need help with?",
+            ["Forgot Username?", "Forgot Password?"],
+        )
+
+        if recovery_choice == "Forgot Username?":
+            with st.form("forgot_user_form"):
+                rec_email = st.text_input(
+                    "Enter your registered email"
+                ).strip()
+                rec_btn = st.form_submit_button("Retrieve Username")
+                if rec_btn:
                     cursor.execute(
-                        "INSERT INTO users (username, password, bio, status,"
-                        " last_seen) VALUES (?, ?, ?, ?, ?)",
-                        (
-                            unique_handle,
-                            hash_password(sign_pass),
-                            "Hey there! I am using Unichat.",
-                            "🟢 Online",
-                            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                        ),
+                        "SELECT username FROM users WHERE email = ?",
+                        (rec_email,),
                     )
-                    conn.commit()
-                    st.session_state.authenticated = True
-                    st.session_state.username = unique_handle
-                    if remember_signup:
-                        st.query_params["user"] = unique_handle
-                    st.success(
-                        f"Account created successfully! Your full handle is: {unique_handle}"
+                    rows = cursor.fetchall()
+                    if rows:
+                        usernames = [r[0] for r in rows]
+                        st.success(
+                            f"✅ Email found! Associated username(s):"
+                            f" {', '.join(usernames)}"
+                        )
+                    else:
+                        st.error(
+                            "No account found associated with that email."
+                        )
+
+        else:
+            with st.form("forgot_pass_form"):
+                f_user = st.text_input("Enter your full username").strip()
+                f_email = st.text_input(
+                    "Enter your registered email"
+                ).strip()
+                new_pass = st.text_input(
+                    "Enter New Password", type="password"
+                )
+                reset_btn = st.form_submit_button("Reset Password")
+                if reset_btn:
+                    cursor.execute(
+                        "SELECT username FROM users WHERE username = ? AND email"
+                        " = ?",
+                        (f_user, f_email),
                     )
-                    st.rerun()
+                    if cursor.fetchone():
+                        cursor.execute(
+                            "UPDATE users SET password = ? WHERE username = ?",
+                            (hash_password(new_pass), f_user),
+                        )
+                        conn.commit()
+                        st.success(
+                            "🔒 Password successfully reset! You can now log in"
+                            " with your new password."
+                        )
+                    else:
+                        st.error(
+                            "Username and email combination do not match our"
+                            " records."
+                        )
 
     st.stop()
 
@@ -473,6 +608,41 @@ with st.sidebar:
             st.rerun()
 
     st.markdown("---")
+
+    # Pending IP Access Requests (Owner Authorization Feature)
+    cursor.execute(
+        "SELECT id, ip FROM login_requests WHERE username = ?",
+        (st.session_state.username,),
+    )
+    pending_ips = cursor.fetchall()
+    if pending_ips:
+        with st.expander(
+            f"🔔 Device Login Requests ({len(pending_ips)})", expanded=True
+        ):
+            st.warning(
+                "An unknown IP is trying to log into your account!"
+            )
+            for req_id, req_ip in pending_ips:
+                st.write(f"IP: **{req_ip}**")
+                col_app1, col_app2 = st.columns(2)
+                if col_app1.button("Approve", key=f"app_ip_{req_id}"):
+                    cursor.execute(
+                        "INSERT OR IGNORE INTO trusted_ips (username, ip)"
+                        " VALUES (?, ?)",
+                        (st.session_state.username, req_ip),
+                    )
+                    cursor.execute(
+                        "DELETE FROM login_requests WHERE id = ?", (req_id,)
+                    )
+                    conn.commit()
+                    st.success(f"Approved IP {req_ip}!")
+                    st.rerun()
+                if col_app2.button("Deny", key=f"den_ip_{req_id}"):
+                    cursor.execute(
+                        "DELETE FROM login_requests WHERE id = ?", (req_id,)
+                    )
+                    conn.commit()
+                    st.rerun()
 
     # Admin Broadcast Panel
     if st.session_state.username == "AdminMike1":
@@ -888,7 +1058,6 @@ def live_chat_stream():
     with chat_container:
         channel_msgs = get_messages(st.session_state.current_channel)
 
-        # Filter messages if search query exists
         if search_query:
             channel_msgs = [
                 m for m in channel_msgs if search_query.lower() in m["text"].lower()
@@ -904,7 +1073,6 @@ def live_chat_stream():
                         st.session_state.inspect_user = msg["user"]
                         st.rerun()
                 with col_msg_body:
-                    # Render attached media/files
                     file_html = ""
                     if msg["file_url"]:
                         if any(
@@ -931,7 +1099,6 @@ def live_chat_stream():
                         unsafe_allow_html=True,
                     )
 
-                    # Message Owner Edit/Delete Actions
                     if msg["user"] == st.session_state.username:
                         col_act_e, col_act_d, _ = st.columns([1, 1, 8])
                         if col_act_e.button("Edit", key=f"edit_{msg['id']}"):
@@ -984,7 +1151,7 @@ def live_chat_stream():
 
                 file_path = None
                 if uploaded_file:
-                    file_path = uploaded_file.name  # Simple local reference
+                    file_path = uploaded_file.name
 
                 cursor.execute(
                     "INSERT INTO messages (channel, user, text, time, file_url) VALUES (?, ?, ?, ?, ?)",
