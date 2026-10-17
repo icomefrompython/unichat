@@ -14,13 +14,10 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# === IP RESTRICTION & IDENTIFICATION CONFIGURATION ===
-MY_IP_ADDRESS = "127.0.0.1"
-
 
 def get_client_ip():
     try:
-        # Fallback helper for local vs cloud environments
+        # Safe fallback for cloud/local environments
         return "127.0.0.1"
     except Exception:
         return "127.0.0.1"
@@ -43,10 +40,18 @@ st.markdown(
 )
 
 
-# --- DATABASE SETUP ---
+# --- DATABASE SETUP (With Dynamic IP Config Storage) ---
 def init_db():
     conn = sqlite3.connect("unichat.db", check_same_thread=False)
     cursor = conn.cursor()
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS app_config (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        )
+    """
+    )
     cursor.execute(
         """
         CREATE TABLE IF NOT EXISTS users (
@@ -175,6 +180,20 @@ def init_db():
 conn, cursor = init_db()
 
 
+def get_saved_owner_ip():
+    cursor.execute("SELECT value FROM app_config WHERE key = 'owner_ip'")
+    row = cursor.fetchone()
+    return row[0] if row else None
+
+
+def save_owner_ip(ip):
+    cursor.execute(
+        "INSERT OR REPLACE INTO app_config (key, value) VALUES ('owner_ip', ?)",
+        (ip,),
+    )
+    conn.commit()
+
+
 def hash_password(password):
     return hashlib.sha256(password.encode()).hexdigest()
 
@@ -183,6 +202,31 @@ def generate_random_suffix(length=20):
     return "".join(
         random.choices(string.ascii_letters + string.digits, k=length)
     )
+
+
+# --- INITIAL SETUP WIZARD IF NO OWNER IP IS CONFIGURED YET ---
+saved_owner_ip = get_saved_owner_ip()
+if not saved_owner_ip:
+    st.title("🛡️ Unichat Security Setup")
+    st.markdown(
+        "Welcome! Since this is a fresh setup, please specify your authorized"
+        " IP address to restrict account creations."
+    )
+    with st.form("setup_ip_form"):
+        input_ip = st.text_input(
+            "Your Authorized IP Address",
+            value="127.0.0.1",
+            placeholder="e.g. 192.168.1.50",
+        )
+        setup_btn = st.form_submit_button("Save & Continue")
+        if setup_btn:
+            if input_ip.strip():
+                save_owner_ip(input_ip.strip())
+                st.success("IP configuration saved successfully!")
+                st.rerun()
+            else:
+                st.error("Please enter a valid IP address.")
+    st.stop()
 
 
 # --- PERSISTENT SESSION HANDLING ---
@@ -431,7 +475,6 @@ if not st.session_state.authenticated:
                     if row and row[0] == hash_password(log_pass):
                         current_ip = get_client_ip()
 
-                        # Check if IP is trusted for this account
                         cursor.execute(
                             "SELECT 1 FROM trusted_ips WHERE username = ? AND ip = ?",
                             (log_user, current_ip),
@@ -442,7 +485,6 @@ if not st.session_state.authenticated:
                             "SELECT 1 FROM trusted_ips WHERE username = ?",
                             (log_user,),
                         ).fetchone():
-                            # If trusted or first time device check, authorize login and trust IP
                             cursor.execute(
                                 "INSERT OR IGNORE INTO trusted_ips (username, ip) VALUES (?, ?)",
                                 (log_user, current_ip),
@@ -455,7 +497,6 @@ if not st.session_state.authenticated:
                             st.success("Logged in successfully!")
                             st.rerun()
                         else:
-                            # Log IP access attempt request
                             cursor.execute(
                                 "INSERT INTO login_requests (username, ip) VALUES (?, ?)",
                                 (log_user, current_ip),
@@ -471,6 +512,8 @@ if not st.session_state.authenticated:
 
     with auth_tab2:
         client_ip = get_client_ip()
+        owner_ip = get_saved_owner_ip()
+
         with st.form("signup_form"):
             sign_user = st.text_input("Choose a Base Username").strip()
             sign_email = st.text_input("Email Address").strip()
@@ -481,7 +524,7 @@ if not st.session_state.authenticated:
             sign_btn = st.form_submit_button("Sign Up")
 
             if sign_btn:
-                if client_ip != MY_IP_ADDRESS:
+                if client_ip != owner_ip:
                     st.error(
                         f"Access Denied: Your IP ({client_ip}) is not authorized"
                         " to register new accounts."
@@ -609,7 +652,6 @@ with st.sidebar:
 
     st.markdown("---")
 
-    # Pending IP Access Requests (Owner Authorization Feature)
     cursor.execute(
         "SELECT id, ip FROM login_requests WHERE username = ?",
         (st.session_state.username,),
@@ -619,9 +661,7 @@ with st.sidebar:
         with st.expander(
             f"🔔 Device Login Requests ({len(pending_ips)})", expanded=True
         ):
-            st.warning(
-                "An unknown IP is trying to log into your account!"
-            )
+            st.warning("An unknown IP is trying to log into your account!")
             for req_id, req_ip in pending_ips:
                 st.write(f"IP: **{req_ip}**")
                 col_app1, col_app2 = st.columns(2)
@@ -644,7 +684,6 @@ with st.sidebar:
                     conn.commit()
                     st.rerun()
 
-    # Admin Broadcast Panel
     if st.session_state.username == "AdminMike1":
         with st.expander("📢 Send Broadcast Announcement"):
             broadcast_text = st.text_area("Broadcast Message")
@@ -860,10 +899,14 @@ with st.sidebar:
                     st.rerun()
 
 # --- MAIN CONTENT AREA ---
-cursor.execute("SELECT 1 FROM groups WHERE group_name = ?", (st.session_state.current_channel,))
-is_group = bool(cursor.fetchone() or st.session_state.current_channel == "General Chat")
+cursor.execute(
+    "SELECT 1 FROM groups WHERE group_name = ?",
+    (st.session_state.current_channel,),
+)
+is_group = bool(
+    cursor.fetchone() or st.session_state.current_channel == "General Chat"
+)
 
-# Display Broadcast Banners
 cursor.execute("SELECT text, time FROM broadcasts ORDER BY id DESC LIMIT 1")
 latest_broadcast = cursor.fetchone()
 if latest_broadcast:
@@ -880,7 +923,6 @@ st.title(
     f"{'#' if is_group else '💬'} {st.session_state.current_channel}"
 )
 
-# User Profile Card Inspector
 if st.session_state.inspect_user:
     u = st.session_state.inspect_user
     cursor.execute(
@@ -926,7 +968,6 @@ if st.session_state.inspect_user:
             st.rerun()
     st.markdown("---")
 
-# Group Settings Inspector
 if st.session_state.inspect_group and is_group:
     g_name = st.session_state.current_channel
     g_owner = get_group_owner(g_name)
@@ -954,7 +995,6 @@ if st.session_state.inspect_group and is_group:
         st.rerun()
     st.markdown("---")
 
-# Action buttons row
 col_btn1, col_btn2, col_btn3, col_spacer = st.columns([1, 1, 1, 3])
 with col_btn1:
     if st.button("📞 Start Call"):
@@ -972,7 +1012,6 @@ with col_btn3:
     if st.button("⚙️ Settings"):
         st.info("Settings panel active.")
 
-# WebRTC Call Interface
 if st.session_state.in_call:
     st.markdown("### 🔴 Live Video/Audio Call Active")
     cc1, cc2, cc3 = st.columns(3)
@@ -1017,13 +1056,11 @@ if st.session_state.in_call:
 
 st.markdown("---")
 
-# Message Search & History Filtering Bar
 search_query = st.text_input(
     "🔍 Search messages in this channel...",
     placeholder="Type keyword to filter history...",
 )
 
-# Handle message edits
 if st.session_state.editing_msg_id:
     cursor.execute(
         "SELECT text FROM messages WHERE id = ?",
@@ -1032,14 +1069,15 @@ if st.session_state.editing_msg_id:
     edit_row = cursor.fetchone()
     if edit_row:
         with st.form("edit_msg_form"):
-            new_text_val = st.text_input(
-                "Edit message", value=edit_row[0]
-            )
+            new_text_val = st.text_input("Edit message", value=edit_row[0])
             col_e1, col_e2 = st.columns(2)
             if col_e1.form_submit_button("Save Changes"):
                 cursor.execute(
                     "UPDATE messages SET text = ? WHERE id = ?",
-                    (filter_message(new_text_val), st.session_state.editing_msg_id),
+                    (
+                        filter_message(new_text_val),
+                        st.session_state.editing_msg_id,
+                    ),
                 )
                 conn.commit()
                 st.session_state.editing_msg_id = None
@@ -1049,7 +1087,6 @@ if st.session_state.editing_msg_id:
                 st.rerun()
 
 
-# --- LIVE MESSAGING CONTAINER ---
 @st.fragment(run_every=2)
 def live_chat_stream():
     mark_channel_read(st.session_state.username, st.session_state.current_channel)
@@ -1060,7 +1097,9 @@ def live_chat_stream():
 
         if search_query:
             channel_msgs = [
-                m for m in channel_msgs if search_query.lower() in m["text"].lower()
+                m
+                for m in channel_msgs
+                if search_query.lower() in m["text"].lower()
             ]
 
         if not channel_msgs:
@@ -1111,14 +1150,12 @@ def live_chat_stream():
                             conn.commit()
                             st.rerun()
 
-    # Emoji Picker
     selected_emoji = st.selectbox(
         "Quick Emojis",
         ["", "😀", "😂", "👍", "❤️", "🔥", "🎉", "🚀", "💡", "🙌"],
         key="emoji_picker",
     )
 
-    # Bottom Message Input & Media/File Uploader
     with st.form(key="message_form", clear_on_submit=True):
         user_input = st.text_input(
             f"Message {st.session_state.current_channel}",
@@ -1128,7 +1165,18 @@ def live_chat_stream():
         )
         uploaded_file = st.file_uploader(
             "Attach image, video or file",
-            type=["png", "jpg", "jpeg", "gif", "mp4", "mov", "avi", "mkv", "pdf", "txt"],
+            type=[
+                "png",
+                "jpg",
+                "jpeg",
+                "gif",
+                "mp4",
+                "mov",
+                "avi",
+                "mkv",
+                "pdf",
+                "txt",
+            ],
         )
         submit_btn = st.form_submit_button(label="⬆ Send")
 
