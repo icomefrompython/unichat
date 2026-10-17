@@ -4,7 +4,6 @@ import random
 import string
 import sqlite3
 import streamlit as st
-from streamlit.web.server.websocket_headers import _get_websocket_headers
 from streamlit_webrtc import RTCConfiguration, webrtc_streamer
 
 # Page configuration
@@ -16,28 +15,12 @@ st.set_page_config(
 )
 
 # === IP RESTRICTION CONFIGURATION ===
-# Replace this with your actual public or local IP address (e.g., "192.168.1.50" or "203.0.113.5")
-MY_IP_ADDRESS = "24.24.137.252"
+MY_IP_ADDRESS = "127.0.0.1"
 
 
 def get_client_ip():
-    try:
-        headers = _get_websocket_headers()
-        if headers:
-            # Check common proxy/forwarded headers first, then fallback to remote addr
-            for key in [
-                "X-Forwarded-For",
-                "X-Real-Ip",
-                "X-Client-Ip",
-                "Remote-Addr",
-            ]:
-                if key in headers:
-                    ip = headers[key].split(",")[0].strip()
-                    if ip:
-                        return ip
-    except Exception:
-        pass
-    return "127.0.0.1"  # Fallback default
+    # Safe fallback for cloud environments without direct socket header access
+    return "127.0.0.1"
 
 
 # Custom CSS
@@ -431,9 +414,6 @@ if not st.session_state.authenticated:
                         st.error("Invalid username or password.")
 
     with auth_tab2:
-        # Check IP before allowing signup with the special randomized suffix feature
-        client_ip = get_client_ip()
-
         with st.form("signup_form"):
             sign_user = st.text_input("Choose a Base Username").strip()
             sign_pass = st.text_input("Choose a Password", type="password")
@@ -443,44 +423,38 @@ if not st.session_state.authenticated:
             sign_btn = st.form_submit_button("Sign Up")
 
             if sign_btn:
-                # Enforce IP restriction
-                if client_ip != MY_IP_ADDRESS:
-                    st.error(
-                        f"Access Denied: Your IP ({client_ip}) is not authorized to register new accounts."
-                    )
+                sign_user = sign_user.strip()
+                if not sign_user or not sign_pass:
+                    st.error("Please fill in all fields.")
+                elif sign_user.lower() == "adminmike1":
+                    st.error("The username 'AdminMike1' is reserved.")
+                elif len(sign_user) < 3:
+                    st.error("Username must be at least 3 characters long.")
                 else:
-                    sign_user = sign_user.strip()
-                    if not sign_user or not sign_pass:
-                        st.error("Please fill in all fields.")
-                    elif sign_user.lower() == "adminmike1":
-                        st.error("The username 'AdminMike1' is reserved.")
-                    elif len(sign_user) < 3:
-                        st.error("Username must be at least 3 characters long.")
-                    else:
-                        unique_handle = (
-                            f"{sign_user}_{generate_random_suffix(24)}"
-                        )
+                    unique_handle = (
+                        f"{sign_user}_{generate_random_suffix(24)}"
+                    )
 
-                        cursor.execute(
-                            "INSERT INTO users (username, password, bio, status,"
-                            " last_seen) VALUES (?, ?, ?, ?, ?)",
-                            (
-                                unique_handle,
-                                hash_password(sign_pass),
-                                "Hey there! I am using Unichat.",
-                                "🟢 Online",
-                                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                            ),
-                        )
-                        conn.commit()
-                        st.session_state.authenticated = True
-                        st.session_state.username = unique_handle
-                        if remember_signup:
-                            st.query_params["user"] = unique_handle
-                        st.success(
-                            f"Account created successfully! Your full handle is: {unique_handle}"
-                        )
-                        st.rerun()
+                    cursor.execute(
+                        "INSERT INTO users (username, password, bio, status,"
+                        " last_seen) VALUES (?, ?, ?, ?, ?)",
+                        (
+                            unique_handle,
+                            hash_password(sign_pass),
+                            "Hey there! I am using Unichat.",
+                            "🟢 Online",
+                            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        ),
+                    )
+                    conn.commit()
+                    st.session_state.authenticated = True
+                    st.session_state.username = unique_handle
+                    if remember_signup:
+                        st.query_params["user"] = unique_handle
+                    st.success(
+                        f"Account created successfully! Your full handle is: {unique_handle}"
+                    )
+                    st.rerun()
 
     st.stop()
 
