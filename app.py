@@ -15,7 +15,7 @@ st.set_page_config(
 )
 
 # === HARDCODED OWNER IP CONFIGURATION ===
-OWNER_IP_ADDRESS = "24.24.137.252"
+OWNER_IP_ADDRESS = "YOUR_IP_HERE"
 
 
 def get_client_ip():
@@ -29,17 +29,34 @@ def get_client_ip():
     return "127.0.0.1"
 
 
-# Custom CSS
+# Initialize Theme state
+if "theme_mode" not in st.session_state:
+    st.session_state.theme_mode = "Dark"
+
+# Custom CSS depending on theme
+if st.session_state.theme_mode == "Light":
+    bg_color = "#ffffff"
+    text_color = "#24292f"
+    sidebar_bg = "#f6f8fa"
+    border_color = "#d0d7de"
+    chat_box_bg = "#f6f8fa"
+else:
+    bg_color = "#0d1117"
+    text_color = "#e6edf3"
+    sidebar_bg = "#161b22"
+    border_color = "#30363d"
+    chat_box_bg = "#161b22"
+
 st.markdown(
-    """
+    f"""
     <style>
-    .stApp { background-color: #0d1117; color: #e6edf3; }
-    section[data-testid="stSidebar"] { background-color: #161b22; border-right: 1px solid #30363d; }
-    .chat-box { background-color: #161b22; padding: 12px 16px; border-radius: 6px; border: 1px solid #30363d; margin-bottom: 10px; }
-    div.stButton > button { background-color: #21262d; color: #c9d1d9; border: 1px solid #30363d; text-align: left; }
-    div.stButton > button:hover { background-color: #30363d; color: #ffffff; }
-    .badge { background-color: #f85149; color: white; border-radius: 10px; padding: 2px 6px; font-size: 0.75em; font-weight: bold; float: right; }
-    .broadcast-banner { background-color: #1f6feb; color: white; padding: 10px; border-radius: 6px; margin-bottom: 15px; font-weight: bold; text-align: center; }
+    .stApp {{ background-color: {bg_color}; color: {text_color}; }}
+    section[data-testid="stSidebar"] {{ background-color: {sidebar_bg}; border-right: 1px solid {border_color}; }}
+    .chat-box {{ background-color: {chat_box_bg}; padding: 12px 16px; border-radius: 6px; border: 1px solid {border_color}; margin-bottom: 10px; }}
+    div.stButton > button {{ background-color: {sidebar_bg}; color: {text_color}; border: 1px solid {border_color}; text-align: left; }}
+    div.stButton > button:hover {{ background-color: {border_color}; color: {text_color}; }}
+    .broadcast-banner {{ background-color: #1f6feb; color: white; padding: 10px; border-radius: 6px; margin-bottom: 15px; font-weight: bold; text-align: center; }}
+    .pinned-banner {{ background-color: #21262d; border: 1px solid #f0883e; padding: 10px; border-radius: 6px; margin-bottom: 15px; }}
     </style>
 """,
     unsafe_allow_html=True,
@@ -99,15 +116,40 @@ def init_db():
             user TEXT,
             text TEXT,
             time TEXT,
-            file_url TEXT
+            file_url TEXT,
+            pinned INTEGER DEFAULT 0
         )
     """
     )
-    try:
-        cursor.execute("ALTER TABLE messages ADD COLUMN file_url TEXT")
-    except sqlite3.OperationalError:
-        pass
+    for col, col_type in [
+        ("file_url", "TEXT"),
+        ("pinned", "INTEGER DEFAULT 0"),
+    ]:
+        try:
+            cursor.execute(f"ALTER TABLE messages ADD COLUMN {col} {col_type}")
+        except sqlite3.OperationalError:
+            pass
 
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS reactions (
+            message_id INTEGER,
+            emoji TEXT,
+            username TEXT,
+            PRIMARY KEY (message_id, emoji, username)
+        )
+    """
+    )
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS typing_status (
+            channel TEXT,
+            username TEXT,
+            timestamp TEXT,
+            PRIMARY KEY (channel, username)
+        )
+    """
+    )
     cursor.execute(
         """
         CREATE TABLE IF NOT EXISTS friends (
@@ -316,12 +358,19 @@ def get_db_channel(user, channel):
 def get_messages(channel):
     db_chan = get_db_channel(st.session_state.username, channel)
     cursor.execute(
-        "SELECT id, user, text, time, file_url FROM messages WHERE channel = ? ORDER BY id ASC",
+        "SELECT id, user, text, time, file_url, pinned FROM messages WHERE channel = ? ORDER BY id ASC",
         (db_chan,),
     )
     rows = cursor.fetchall()
     return [
-        {"id": r[0], "user": r[1], "text": r[2], "time": r[3], "file_url": r[4]}
+        {
+            "id": r[0],
+            "user": r[1],
+            "text": r[2],
+            "time": r[3],
+            "file_url": r[4],
+            "pinned": r[5],
+        }
         for r in rows
     ]
 
@@ -374,6 +423,20 @@ def mark_channel_read(username, channel):
         (username, db_chan, max_id, max_id),
     )
     conn.commit()
+
+
+def get_reactions(message_id):
+    cursor.execute(
+        "SELECT emoji, username FROM reactions WHERE message_id = ?",
+        (message_id,),
+    )
+    rows = cursor.fetchall()
+    reaction_map = {}
+    for emoji, uname in rows:
+        if emoji not in reaction_map:
+            reaction_map[emoji] = []
+        reaction_map[emoji].append(uname)
+    return reaction_map
 
 
 BAD_WORDS = [
@@ -645,6 +708,13 @@ with st.sidebar:
                     st.rerun()
 
     with st.expander("⚙️ Settings & Profile"):
+        st.session_state.theme_mode = st.selectbox(
+            "🌓 Theme Appearance",
+            ["Dark", "Light"],
+            index=0
+            if st.session_state.theme_mode == "Dark"
+            else 1,
+        )
         st.session_state.safe_chat = st.checkbox(
             "🛡 Safe Chat Filter", value=st.session_state.safe_chat
         )
@@ -680,6 +750,7 @@ with st.sidebar:
             )
             conn.commit()
             st.success("Profile updated successfully!")
+            st.rerun()
 
     st.markdown("---")
 
@@ -828,7 +899,7 @@ with st.sidebar:
                 last_msg, last_time = get_last_message(group)
 
                 button_label = (
-                    f"{icon} #{group}\n\n💬 {last_msg} ({last_time})"
+                    f"{icon} #{group} {unread if unread > 0 else ''}\n\n💬 {last_msg} ({last_time})"
                     if last_time
                     else f"{icon} #{group}\n\n💬 No messages yet"
                 )
@@ -863,6 +934,28 @@ if latest_broadcast:
 st.title(
     f"{'#' if is_group else '💬'} {st.session_state.current_channel}"
 )
+
+# --- PINNED MESSAGES BANNER ---
+current_db_chan = get_db_channel(
+    st.session_state.username, st.session_state.current_channel
+)
+cursor.execute(
+    "SELECT id, user, text, time FROM messages WHERE channel = ? AND pinned = 1",
+    (current_db_chan,),
+)
+pinned_msgs = cursor.fetchall()
+if pinned_msgs:
+    pinned_text = " | ".join(
+        [f"📌 **{m[1]}**: {m[2]} ({m[3]})" for m in pinned_msgs]
+    )
+    st.markdown(
+        f"""
+        <div class="pinned-banner">
+            {pinned_text}
+        </div>
+    """,
+        unsafe_allow_html=True,
+    )
 
 if st.session_state.inspect_user:
     u = st.session_state.inspect_user
@@ -1068,28 +1161,99 @@ def live_chat_stream():
                         else:
                             file_html = f'<br><a href="{msg["file_url"]}" target="_blank">📎 Download Attached File</a>'
 
+                    # Display message reactions
+                    reactions = get_reactions(msg["id"])
+                    reactions_html = ""
+                    if reactions:
+                        react_spans = []
+                        for emoji, users in reactions.items():
+                            react_spans.append(
+                                f'<span style="background-color: {border_color}; padding: 2px 6px; border-radius: 12px; font-size: 0.8em; margin-right: 4px;" title="{", ".join(users)}">{emoji} {len(users)}</span>'
+                            )
+                        reactions_html = f'<div style="margin-top: 6px;">{"".join(react_spans)}</div>'
+
                     st.markdown(
                         f"""
                         <div class="chat-box">
                             <strong>{msg['user']}</strong> <span style="font-size: 0.75em; color: #8b949e; float: right;">{msg['time']}</span><br>
                             <div style="margin-top: 5px;">{msg['text']}</div>
                             {file_html}
+                            {reactions_html}
                         </div>
                     """,
                         unsafe_allow_html=True,
                     )
+
+                    # Quick reaction buttons
+                    r_col1, r_col2, r_col3, r_col4, r_col5, _ = st.columns(
+                        [1, 1, 1, 1, 1, 8]
+                    )
+                    if r_col1.button("👍", key=f"re_th_{msg['id']}"):
+                        cursor.execute(
+                            "INSERT OR IGNORE INTO reactions (message_id, emoji, username) VALUES (?, ?, ?)",
+                            (msg["id"], "👍", st.session_state.username),
+                        )
+                        conn.commit()
+                        st.rerun()
+                    if r_col2.button("❤️", key=f"re_hr_{msg['id']}"):
+                        cursor.execute(
+                            "INSERT OR IGNORE INTO reactions (message_id, emoji, username) VALUES (?, ?, ?)",
+                            (msg["id"], "❤️", st.session_state.username),
+                        )
+                        conn.commit()
+                        st.rerun()
+                    if r_col3.button("😂", key=f"re_la_{msg['id']}"):
+                        cursor.execute(
+                            "INSERT OR IGNORE INTO reactions (message_id, emoji, username) VALUES (?, ?, ?)",
+                            (msg["id"], "😂", st.session_state.username),
+                        )
+                        conn.commit()
+                        st.rerun()
+                    if r_col4.button("🔥", key=f"re_fi_{msg['id']}"):
+                        cursor.execute(
+                            "INSERT OR IGNORE INTO reactions (message_id, emoji, username) VALUES (?, ?, ?)",
+                            (msg["id"], "🔥", st.session_state.username),
+                        )
+                        conn.commit()
+                        st.rerun()
+                    if r_col5.button(
+                        "📌 Pin" if not msg["pinned"] else "📍 Unpin",
+                        key=f"pin_{msg['id']}",
+                    ):
+                        new_pin_val = 0 if msg["pinned"] else 1
+                        cursor.execute(
+                            "UPDATE messages SET pinned = ? WHERE id = ?",
+                            (new_pin_val, msg["id"]),
+                        )
+                        conn.commit()
+                        st.rerun()
 
                     if msg["user"] == st.session_state.username:
                         col_act_e, col_act_d, _ = st.columns([1, 1, 8])
                         if col_act_e.button("Edit", key=f"edit_{msg['id']}"):
                             st.session_state.editing_msg_id = msg["id"]
                             st.rerun()
-                        if col_act_d.button("Delete", key=f"del_{msg['id']}"):
+                        if col_act_d.button(
+                            "Delete", key=f"del_{msg['id']}"
+                        ):
                             cursor.execute(
                                 "DELETE FROM messages WHERE id = ?", (msg["id"],)
                             )
                             conn.commit()
                             st.rerun()
+
+    # --- LIVE TYPING INDICATORS ---
+    now_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    cursor.execute(
+        "SELECT username FROM typing_status WHERE channel = ? AND username != ?",
+        (current_db_chan, st.session_state.username),
+    )
+    typing_users = [row[0] for row in cursor.fetchall()]
+    if typing_users:
+        st.markdown(
+            f"<p style='color: #8b949e; font-style: italic; font-size: 0.85em;'>💬 {', '.join(typing_users)} is typing...</p>",
+            unsafe_allow_html=True,
+        )
 
     # --- APPLE-STYLE RECTANGLE EMOJI POPUP & MESSAGE INPUT BAR ---
     with st.container():
@@ -1100,7 +1264,15 @@ def live_chat_stream():
             label_visibility="collapsed",
             key="chat_input_field",
         )
-        st.session_state.draft_message = user_msg
+
+        if user_msg != st.session_state.draft_message:
+            st.session_state.draft_message = user_msg
+            if user_msg.strip():
+                cursor.execute(
+                    "INSERT INTO typing_status (channel, username, timestamp) VALUES (?, ?, ?) ON CONFLICT(channel, username) DO UPDATE SET timestamp = ?",
+                    (current_db_chan, st.session_state.username, now_ts, now_ts),
+                )
+                conn.commit()
 
         col_act_emoji, col_act_file, col_act_send = st.columns([1, 1, 8])
 
@@ -1182,6 +1354,10 @@ def live_chat_stream():
                             timestamp,
                             file_path,
                         ),
+                    )
+                    cursor.execute(
+                        "DELETE FROM typing_status WHERE channel = ? AND username = ?",
+                        (db_chan, st.session_state.username),
                     )
                     conn.commit()
                     st.session_state.draft_message = ""
