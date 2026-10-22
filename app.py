@@ -15,7 +15,7 @@ st.set_page_config(
 )
 
 # === HARDCODED OWNER IP CONFIGURATION ===
-OWNER_IP_ADDRESS = "YOUR_IP_HERE"
+OWNER_IP_ADDRESS = "24.24.137.252"
 
 
 def get_client_ip():
