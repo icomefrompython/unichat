@@ -421,13 +421,6 @@ if not st.session_state.authenticated:
             if log_btn:
                 if not log_user or not log_pass:
                     st.error("Please fill in all fields.")
-                elif log_user == "AdminMike1":
-                    st.session_state.authenticated = True
-                    st.session_state.username = "AdminMike1"
-                    if remember_me:
-                        st.query_params["user"] = "AdminMike1"
-                    st.success("Welcome back, Admin!")
-                    st.rerun()
                 else:
                     cursor.execute(
                         "SELECT password FROM users WHERE username = ?",
@@ -488,8 +481,6 @@ if not st.session_state.authenticated:
                 sign_user = sign_user.strip()
                 if not sign_user or not sign_pass or not sign_email:
                     st.error("Please fill in all fields.")
-                elif sign_user.lower() == "adminmike1":
-                    st.error("The username 'AdminMike1' is reserved.")
                 elif len(sign_user) < 3:
                     st.error("Username must be at least 3 characters long.")
                 else:
@@ -635,7 +626,9 @@ with st.sidebar:
                     conn.commit()
                     st.rerun()
 
-    if st.session_state.username == "AdminMike1":
+    # IP-Based Admin Broadcast Check
+    current_user_ip = get_client_ip()
+    if current_user_ip == OWNER_IP_ADDRESS:
         with st.expander("📢 Send Broadcast Announcement"):
             broadcast_text = st.text_area("Broadcast Message")
             if st.button("Publish Broadcast"):
@@ -697,14 +690,11 @@ with st.sidebar:
         if st.button("Send Connection Request"):
             search_target = search_target.strip()
             if search_target and search_target != st.session_state.username:
-                if search_target != "AdminMike1":
-                    cursor.execute(
-                        "SELECT username FROM users WHERE username = ?",
-                        (search_target,),
-                    )
-                    user_found = cursor.fetchone()
-                else:
-                    user_found = True
+                cursor.execute(
+                    "SELECT username FROM users WHERE username = ?",
+                    (search_target,),
+                )
+                user_found = cursor.fetchone()
 
                 if not user_found:
                     st.error(f"User '{search_target}' does not exist.")
