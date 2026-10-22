@@ -1,5 +1,6 @@
 from datetime import datetime
 import hashlib
+import re
 import random
 import string
 import sqlite3
@@ -57,6 +58,10 @@ st.markdown(
     div.stButton > button:hover {{ background-color: {border_color}; color: {text_color}; }}
     .broadcast-banner {{ background-color: #1f6feb; color: white; padding: 10px; border-radius: 6px; margin-bottom: 15px; font-weight: bold; text-align: center; }}
     .pinned-banner {{ background-color: #21262d; border: 1px solid #f0883e; padding: 10px; border-radius: 6px; margin-bottom: 15px; }}
+    .badge-owner {{ background-color: #f0883e; color: white; padding: 2px 6px; border-radius: 4px; font-size: 0.75em; font-weight: bold; margin-left: 6px; }}
+    .badge-admin {{ background-color: #238636; color: white; padding: 2px 6px; border-radius: 4px; font-size: 0.75em; font-weight: bold; margin-left: 6px; }}
+    .badge-vip {{ background-color: #a371f7; color: white; padding: 2px 6px; border-radius: 4px; font-size: 0.75em; font-weight: bold; margin-left: 6px; }}
+    .poll-box {{ background-color: {sidebar_bg}; border: 1px solid {border_color}; padding: 12px; border-radius: 6px; margin-top: 8px; margin-bottom: 8px; }}
     </style>
 """,
     unsafe_allow_html=True,
@@ -147,6 +152,28 @@ def init_db():
             username TEXT,
             timestamp TEXT,
             PRIMARY KEY (channel, username)
+        )
+    """
+    )
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS polls (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            channel TEXT,
+            creator TEXT,
+            question TEXT,
+            options TEXT,
+            created_at TEXT
+        )
+    """
+    )
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS poll_votes (
+            poll_id INTEGER,
+            username TEXT,
+            option_index INTEGER,
+            PRIMARY KEY (poll_id, username)
         )
     """
     )
@@ -439,6 +466,43 @@ def get_reactions(message_id):
     return reaction_map
 
 
+def get_user_badge_html(username, current_channel):
+    if username == "System":
+        return '<span class="badge-admin">🤖 System</span>'
+
+    g_owner = get_group_owner(current_channel)
+    if g_owner == username and current_channel != "General Chat":
+        return '<span class="badge-owner">👑 Owner</span>'
+
+    cursor.execute("SELECT ip FROM trusted_ips WHERE username = ?", (username,))
+    row = cursor.fetchone()
+    if row and row[0] == OWNER_IP_ADDRESS:
+        return '<span class="badge-admin">🛡️ Admin</span>'
+
+    if len(username) > 15:
+        return '<span class="badge-vip">🌟 VIP</span>'
+
+    return ""
+
+
+def extract_media_html(text):
+    yt_match = re.search(
+        r"(?:https?://)?(?:www\.)?(?:youtube\.com/watch\?v=|youtu\.be/)([a-zA-Z0-9_-]{11})",
+        text,
+    )
+    if yt_match:
+        video_id = yt_match.group(1)
+        return f'<br><iframe width="100%" height="220" src="https://www.youtube.com/embed/{video_id}" frameborder="0" allowfullscreen style="margin-top: 8px; border-radius: 6px;"></iframe>'
+
+    img_match = re.search(
+        r"(https?://\S+\.(?:png|jpg|jpeg|gif|webp))", text, re.IGNORECASE
+    )
+    if img_match:
+        return f'<br><img src="{img_match.group(1)}" style="max-width: 300px; border-radius: 6px; margin-top: 8px;">'
+
+    return ""
+
+
 BAD_WORDS = [
     "shit",
     "fuck",
@@ -656,6 +720,33 @@ with st.sidebar:
             st.rerun()
 
     st.markdown("---")
+
+    # Global Search
+    with st.expander("🔎 Global Search"):
+        g_query = st.text_input(
+            "Search Unichat...", placeholder="Messages, users, groups..."
+        )
+        if g_query.strip():
+            q = f"%{g_query.strip()}%"
+            cursor.execute(
+                "SELECT channel, user, text, time FROM messages WHERE text LIKE ? ORDER BY id DESC LIMIT 5",
+                (q,),
+            )
+            found_msgs = cursor.fetchall()
+            if found_msgs:
+                st.markdown("**Messages:**")
+                for m_chan, m_usr, m_txt, m_tm in found_msgs:
+                    st.caption(f"[{m_chan}] **{m_usr}**: {m_txt} ({m_tm})")
+
+            cursor.execute(
+                "SELECT username, status FROM users WHERE username LIKE ? LIMIT 3",
+                (q,),
+            )
+            found_users = cursor.fetchall()
+            if found_users:
+                st.markdown("**Users:**")
+                for u_name, u_st in found_users:
+                    st.caption(f"👤 {u_name} ({u_st})")
 
     cursor.execute(
         "SELECT id, ip FROM login_requests WHERE username = ?",
@@ -1090,6 +1181,76 @@ if st.session_state.in_call:
 
 st.markdown("---")
 
+# --- LIVE POLLS SECTION ---
+if is_group:
+    with st.expander("📊 Group Polls & Voting"):
+        cursor.execute(
+            "SELECT id, creator, question, options FROM polls WHERE channel = ? ORDER BY id DESC LIMIT 1",
+            (current_db_chan,),
+        )
+        active_poll = cursor.fetchone()
+        if active_poll:
+            poll_id, p_creator, p_question, p_options_str = active_poll
+            p_options = p_options_str.split("|||")
+
+            st.markdown(f"**Poll by {p_creator}:** {p_question}")
+
+            cursor.execute(
+                "SELECT option_index FROM poll_votes WHERE poll_id = ?",
+                (poll_id,),
+            )
+            all_votes = [r[0] for r in cursor.fetchall()]
+            total_votes = len(all_votes)
+
+            for idx, opt in enumerate(p_options):
+                opt_votes = all_votes.count(idx)
+                pct = (opt_votes / total_votes) if total_votes > 0 else 0
+                c_opt1, c_opt2 = st.columns([3, 1])
+                with c_opt1:
+                    st.progress(pct, text=f"{opt} ({opt_votes} votes)")
+                with c_opt2:
+                    if st.button("Vote", key=f"vote_{poll_id}_{idx}"):
+                        cursor.execute(
+                            "INSERT OR REPLACE INTO poll_votes (poll_id, username, option_index) VALUES (?, ?, ?)",
+                            (poll_id, st.session_state.username, idx),
+                        )
+                        conn.commit()
+                        st.rerun()
+
+        st.markdown("---")
+        st.markdown("#### Create a New Poll")
+        with st.form("create_poll_form"):
+            poll_q = st.text_input("Poll Question")
+            poll_opts = st.text_input(
+                "Options (separated by commas)",
+                placeholder="Option 1, Option 2, Option 3",
+            )
+            if st.form_submit_button("Launch Poll"):
+                if poll_q.strip() and poll_opts.strip():
+                    opts_list = [
+                        o.strip()
+                        for o.strip() in poll_opts.split(",")
+                        if o.strip()
+                    ]
+                    if len(opts_list) >= 2:
+                        cursor.execute(
+                            "INSERT INTO polls (channel, creator, question, options, created_at) VALUES (?, ?, ?, ?, ?)",
+                            (
+                                current_db_chan,
+                                st.session_state.username,
+                                poll_q.strip(),
+                                "|||".join(opts_list),
+                                datetime.now().strftime("%Y-%m-%d %H:%M"),
+                            ),
+                        )
+                        conn.commit()
+                        st.success("Poll launched!")
+                        st.rerun()
+                    else:
+                        st.error("Please enter at least 2 options.")
+
+st.markdown("---")
+
 search_query = st.text_input(
     "🔍 Search messages in this channel...",
     placeholder="Type keyword to filter history...",
@@ -1158,8 +1319,21 @@ def live_chat_stream():
                             for ext in [".mp4", ".mov", ".avi", ".mkv"]
                         ):
                             file_html = f'<br><video width="320" height="240" controls style="margin-top: 8px; border-radius: 4px;"><source src="{msg["file_url"]}"></video>'
+                        elif any(
+                            msg["file_url"].endswith(ext)
+                            for ext in [".wav", ".mp3", ".ogg"]
+                        ):
+                            file_html = f'<br><audio controls style="margin-top: 8px;"><source src="{msg["file_url"]}"></audio>'
                         else:
                             file_html = f'<br><a href="{msg["file_url"]}" target="_blank">📎 Download Attached File</a>'
+
+                    # Rich Media Preview Detection
+                    media_html = extract_media_html(msg["text"])
+
+                    # Display user badge
+                    badge_html = get_user_badge_html(
+                        msg["user"], st.session_state.current_channel
+                    )
 
                     # Display message reactions
                     reactions = get_reactions(msg["id"])
@@ -1175,9 +1349,10 @@ def live_chat_stream():
                     st.markdown(
                         f"""
                         <div class="chat-box">
-                            <strong>{msg['user']}</strong> <span style="font-size: 0.75em; color: #8b949e; float: right;">{msg['time']}</span><br>
+                            <strong>{msg['user']}</strong>{badge_html} <span style="font-size: 0.75em; color: #8b949e; float: right;">{msg['time']}</span><br>
                             <div style="margin-top: 5px;">{msg['text']}</div>
                             {file_html}
+                            {media_html}
                             {reactions_html}
                         </div>
                     """,
@@ -1255,7 +1430,7 @@ def live_chat_stream():
             unsafe_allow_html=True,
         )
 
-    # --- APPLE-STYLE RECTANGLE EMOJI POPUP & MESSAGE INPUT BAR ---
+    # --- APPLE-STYLE RECTANGLE EMOJI POPUP, AUDIO RECORDER & INPUT BAR ---
     with st.container():
         user_msg = st.text_input(
             "Message",
@@ -1274,7 +1449,9 @@ def live_chat_stream():
                 )
                 conn.commit()
 
-        col_act_emoji, col_act_file, col_act_send = st.columns([1, 1, 8])
+        col_act_emoji, col_act_audio, col_act_file, col_act_send = st.columns(
+            [1, 2, 2, 5]
+        )
 
         with col_act_emoji:
             with st.popover("😀 Emoji"):
@@ -1300,27 +1477,36 @@ def live_chat_stream():
                             st.session_state.draft_message += em
                             st.rerun()
 
-        uploaded_file = st.file_uploader(
-            "Attach",
-            type=[
-                "png",
-                "jpg",
-                "jpeg",
-                "gif",
-                "mp4",
-                "mov",
-                "avi",
-                "mkv",
-                "pdf",
-                "txt",
-            ],
-            label_visibility="collapsed",
-        )
+        with col_act_audio:
+            voice_note = st.audio_input(
+                "🎙 Record Voice Note", label_visibility="collapsed"
+            )
+
+        with col_act_file:
+            uploaded_file = st.file_uploader(
+                "Attach",
+                type=[
+                    "png",
+                    "jpg",
+                    "jpeg",
+                    "gif",
+                    "mp4",
+                    "mov",
+                    "avi",
+                    "mkv",
+                    "pdf",
+                    "txt",
+                    "wav",
+                    "mp3",
+                ],
+                label_visibility="collapsed",
+            )
 
         if st.button("⬆ Send Message", use_container_width=True):
             if (
                 st.session_state.draft_message.strip()
                 or uploaded_file is not None
+                or voice_note is not None
             ):
                 banned_users = (
                     get_group_bans(st.session_state.current_channel)
@@ -1344,6 +1530,10 @@ def live_chat_stream():
                     file_path = None
                     if uploaded_file:
                         file_path = uploaded_file.name
+                    elif voice_note:
+                        file_path = f"voice_note_{datetime.now().strftime('%Y%m%d_%H%M%S')}.wav"
+                        with open(file_path, "wb") as f:
+                            f.write(voice_note.read())
 
                     cursor.execute(
                         "INSERT INTO messages (channel, user, text, time, file_url) VALUES (?, ?, ?, ?, ?)",
