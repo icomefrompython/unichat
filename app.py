@@ -14,6 +14,9 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
+# === HARDCODED OWNER IP CONFIGURATION ===
+OWNER_IP_ADDRESS = "YOUR_IP_HERE"
+
 
 def get_client_ip():
     try:
@@ -226,6 +229,9 @@ if "blocked_users" not in st.session_state:
 
 if "editing_msg_id" not in st.session_state:
     st.session_state.editing_msg_id = None
+
+if "draft_message" not in st.session_state:
+    st.session_state.draft_message = ""
 
 # Ensure default General Chat group exists
 cursor.execute(
@@ -1095,21 +1101,45 @@ def live_chat_stream():
                             conn.commit()
                             st.rerun()
 
-    selected_emoji = st.selectbox(
-        "Quick Emojis",
-        ["", "😀", "😂", "👍", "❤️", "🔥", "🎉", "🚀", "💡", "🙌"],
-        key="emoji_picker",
-    )
-
-    with st.form(key="message_form", clear_on_submit=True):
-        user_input = st.text_input(
-            f"Message {st.session_state.current_channel}",
-            value=selected_emoji if selected_emoji else "",
-            placeholder=f"Message {st.session_state.current_channel}",
+    # --- APPLE-STYLE RECTANGLE EMOJI POPUP & MESSAGE INPUT BAR ---
+    with st.container():
+        user_msg = st.text_input(
+            "Message",
+            value=st.session_state.draft_message,
+            placeholder=f"Message {st.session_state.current_channel}...",
             label_visibility="collapsed",
+            key="chat_input_field",
         )
+        st.session_state.draft_message = user_msg
+
+        col_act_emoji, col_act_file, col_act_send = st.columns([1, 1, 8])
+
+        with col_act_emoji:
+            with st.popover("😀 Emoji"):
+                st.markdown("### Emojis")
+                emojis = [
+                    "😀",
+                    "😂",
+                    "👍",
+                    "❤️",
+                    "🔥",
+                    "🎉",
+                    "🚀",
+                    "💡",
+                    "🙌",
+                    "😎",
+                    "🤔",
+                    "✨",
+                ]
+                e_cols = st.columns(4)
+                for i, em in enumerate(emojis):
+                    with e_cols[i % 4]:
+                        if st.button(em, key=f"emoji_btn_{i}"):
+                            st.session_state.draft_message += em
+                            st.rerun()
+
         uploaded_file = st.file_uploader(
-            "Attach image, video or file",
+            "Attach",
             type=[
                 "png",
                 "jpg",
@@ -1122,45 +1152,54 @@ def live_chat_stream():
                 "pdf",
                 "txt",
             ],
+            label_visibility="collapsed",
         )
-        submit_btn = st.form_submit_button(label="⬆ Send")
 
-        if submit_btn and (user_input or uploaded_file):
-            banned_users = (
-                get_group_bans(st.session_state.current_channel)
-                if is_group
-                else []
-            )
-            if st.session_state.username in banned_users:
-                st.error("You are banned from sending messages here.")
-            elif st.session_state.simulate_network_error:
-                st.error("Network error: Message not sent.")
-            else:
-                cleaned_text = filter_message(user_input if user_input else "")
-                timestamp = datetime.now().strftime("%H:%M")
-                db_chan = get_db_channel(
-                    st.session_state.username, st.session_state.current_channel
+        if st.button("⬆ Send Message", use_container_width=True):
+            if (
+                st.session_state.draft_message.strip()
+                or uploaded_file is not None
+            ):
+                banned_users = (
+                    get_group_bans(st.session_state.current_channel)
+                    if is_group
+                    else []
                 )
-
-                file_path = None
-                if uploaded_file:
-                    file_path = uploaded_file.name
-
-                cursor.execute(
-                    "INSERT INTO messages (channel, user, text, time, file_url) VALUES (?, ?, ?, ?, ?)",
-                    (
-                        db_chan,
+                if st.session_state.username in banned_users:
+                    st.error("You are banned from sending messages here.")
+                elif st.session_state.simulate_network_error:
+                    st.error("Network error: Message not sent.")
+                else:
+                    cleaned_text = filter_message(
+                        st.session_state.draft_message
+                    )
+                    timestamp = datetime.now().strftime("%H:%M")
+                    db_chan = get_db_channel(
                         st.session_state.username,
-                        cleaned_text,
-                        timestamp,
-                        file_path,
-                    ),
-                )
-                conn.commit()
-                mark_channel_read(
-                    st.session_state.username, st.session_state.current_channel
-                )
-                st.rerun()
+                        st.session_state.current_channel,
+                    )
+
+                    file_path = None
+                    if uploaded_file:
+                        file_path = uploaded_file.name
+
+                    cursor.execute(
+                        "INSERT INTO messages (channel, user, text, time, file_url) VALUES (?, ?, ?, ?, ?)",
+                        (
+                            db_chan,
+                            st.session_state.username,
+                            cleaned_text,
+                            timestamp,
+                            file_path,
+                        ),
+                    )
+                    conn.commit()
+                    st.session_state.draft_message = ""
+                    mark_channel_read(
+                        st.session_state.username,
+                        st.session_state.current_channel,
+                    )
+                    st.rerun()
 
 
 live_chat_stream()
