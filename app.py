@@ -299,14 +299,23 @@ def generate_random_suffix(length=20):
     )
 
 
-# --- PERSISTENT SESSION HANDLING ---
+# --- PERSISTENT SESSION HANDLING (WITH SAVED CREDENTIALS) ---
 query_params = st.query_params
 saved_user = query_params.get("user", "")
+saved_token = query_params.get("token", "")
 
 if "authenticated" not in st.session_state:
-    if saved_user:
-        st.session_state.authenticated = True
-        st.session_state.username = saved_user
+    if saved_user and saved_token:
+        cursor.execute(
+            "SELECT password FROM users WHERE username = ?", (saved_user,)
+        )
+        row = cursor.fetchone()
+        if row and row[0] == saved_token:
+            st.session_state.authenticated = True
+            st.session_state.username = saved_user
+        else:
+            st.session_state.authenticated = False
+            st.session_state.username = ""
     else:
         st.session_state.authenticated = False
         st.session_state.username = ""
@@ -613,7 +622,8 @@ if not st.session_state.authenticated:
                         (log_user,),
                     )
                     row = cursor.fetchone()
-                    if row and row[0] == hash_password(log_pass):
+                    hashed_pw = hash_password(log_pass)
+                    if row and row[0] == hashed_pw:
                         current_ip = get_client_ip()
 
                         cursor.execute(
@@ -635,6 +645,7 @@ if not st.session_state.authenticated:
                             st.session_state.username = log_user
                             if remember_me:
                                 st.query_params["user"] = log_user
+                                st.query_params["token"] = hashed_pw
                             st.success("Logged in successfully!")
                             st.rerun()
                         else:
@@ -671,13 +682,14 @@ if not st.session_state.authenticated:
                     st.error("Username must be at least 3 characters long.")
                 else:
                     unique_handle = f"{sign_user}_{generate_random_suffix(24)}"
+                    hashed_pw = hash_password(sign_pass)
 
                     cursor.execute(
                         "INSERT INTO users (username, password, bio, status,"
                         " last_seen, email) VALUES (?, ?, ?, ?, ?, ?)",
                         (
                             unique_handle,
-                            hash_password(sign_pass),
+                            hashed_pw,
                             "Hey there! I am using Unichat.",
                             "🟢 Online",
                             datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -694,6 +706,7 @@ if not st.session_state.authenticated:
                     st.session_state.username = unique_handle
                     if remember_signup:
                         st.query_params["user"] = unique_handle
+                        st.query_params["token"] = hashed_pw
                     st.success(
                         f"Account created successfully! Your full handle is:"
                         f" {unique_handle}"
@@ -776,6 +789,8 @@ with st.sidebar:
             st.session_state.username = ""
             if "user" in st.query_params:
                 del st.query_params["user"]
+            if "token" in st.query_params:
+                del st.query_params["token"]
             st.rerun()
 
     st.markdown("---")
@@ -1196,7 +1211,9 @@ if st.session_state.inspect_group and is_group:
 
         st.markdown("#### Moderation Controls")
         mute_target = st.selectbox("Select user to mute", g_members)
-        mute_mins = st.number_input("Mute duration (minutes)", value=10, min_value=1)
+        mute_mins = st.number_input(
+            "Mute duration (minutes)", value=10, min_value=1
+        )
         if st.button("Mute User"):
             mute_until = (
                 datetime.now() + timedelta(minutes=mute_mins)
@@ -1279,4 +1296,488 @@ st.markdown("---")
 if is_group:
     with st.expander("📊 Group Polls & Voting"):
         cursor.execute(
-            "
+            "SELECT id, creator, question, options FROM polls WHERE channel = ?"
+            " ORDER BY id DESC LIMIT 1",
+            (current_db_chan,),
+        )
+        active_poll = cursor.fetchone()
+        if active_poll:
+            poll_id, p_creator, p_question, p_options_str = active_poll
+            p_options = p_options_str.split("|||")
+
+            st.markdown(f"**Poll by {p_creator}:** {p_question}")
+
+            cursor.execute(
+                "SELECT option_index FROM poll_votes WHERE poll_id = ?",
+                (poll_id,),
+            )
+            all_votes = [r[0] for r in cursor.fetchall()]
+            total_votes = len(all_votes)
+
+            for idx, opt in enumerate(p_options):
+                opt_votes = all_votes.count(idx)
+                pct = (opt_votes / total_votes) if total_votes > 0 else 0
+                c_opt1, c_opt2 = st.columns([3, 1])
+                with c_opt1:
+                    st.progress(pct, text=f"{opt} ({opt_votes} votes)")
+                with c_opt2:
+                    if st.button("Vote", key=f"vote_{poll_id}_{idx}"):
+                        cursor.execute(
+                            "INSERT OR REPLACE INTO poll_votes (poll_id,"
+                            " username, option_index) VALUES (?, ?, ?)",
+                            (poll_id, st.session_state.username, idx),
+                        )
+                        conn.commit()
+                        st.rerun()
+
+        st.markdown("---")
+        st.markdown("#### Create a New Poll")
+        with st.form("create_poll_form"):
+            poll_q = st.text_input("Poll Question")
+            poll_opts = st.text_input(
+                "Options (separated by commas)",
+                placeholder="Option 1, Option 2, Option 3",
+            )
+            if st.form_submit_button("Launch Poll"):
+                if poll_q.strip() and poll_opts.strip():
+                    opts_list = [
+                        o.strip()
+                        for o.strip() in poll_opts.split(",")
+                        if o.strip()
+                    ]
+                    if len(opts_list) >= 2:
+                        cursor.execute(
+                            "INSERT INTO polls (channel, creator, question,"
+                            " options, created_at) VALUES (?, ?, ?, ?, ?)",
+                            (
+                                current_db_chan,
+                                st.session_state.username,
+                                poll_q.strip(),
+                                "|||".join(opts_list),
+                                datetime.now().strftime("%Y-%m-%d %H:%M"),
+                            ),
+                        )
+                        conn.commit()
+                        st.success("Poll launched!")
+                        st.rerun()
+                    else:
+                        st.error("Please enter at least 2 options.")
+
+st.markdown("---")
+
+search_query = st.text_input(
+    "🔍 Search messages in this channel...",
+    placeholder="Type keyword to filter history...",
+)
+
+if st.session_state.editing_msg_id:
+    cursor.execute(
+        "SELECT text FROM messages WHERE id = ?",
+        (st.session_state.editing_msg_id,),
+    )
+    edit_row = cursor.fetchone()
+    if edit_row:
+        with st.form("edit_msg_form"):
+            new_text_val = st.text_input("Edit message", value=edit_row[0])
+            col_e1, col_e2 = st.columns(2)
+            if col_e1.form_submit_button("Save Changes"):
+                cursor.execute(
+                    "UPDATE messages SET text = ? WHERE id = ?",
+                    (
+                        filter_message(new_text_val),
+                        st.session_state.editing_msg_id,
+                    ),
+                )
+                conn.commit()
+                st.session_state.editing_msg_id = None
+                st.rerun()
+            if col_e2.form_submit_button("Cancel"):
+                st.session_state.editing_msg_id = None
+                st.rerun()
+
+
+@st.fragment(run_every=2)
+def live_chat_stream():
+    mark_channel_read(
+        st.session_state.username, st.session_state.current_channel
+    )
+
+    chat_container = st.container()
+    with chat_container:
+        channel_msgs = get_messages(st.session_state.current_channel)
+
+        if search_query:
+            channel_msgs = [
+                m
+                for m in channel_msgs
+                if search_query.lower() in m["text"].lower()
+            ]
+
+        if not channel_msgs:
+            st.info("No messages found.")
+        else:
+            for idx, msg in enumerate(channel_msgs):
+                col_msg_avatar, col_msg_body = st.columns([1, 15])
+                with col_msg_avatar:
+                    if st.button("👤", key=f"prof_{msg['id']}_{idx}"):
+                        st.session_state.inspect_user = msg["user"]
+                        st.rerun()
+                with col_msg_body:
+                    file_html = ""
+                    if msg["file_url"]:
+                        if any(
+                            msg["file_url"].endswith(ext)
+                            for ext in [".png", ".jpg", ".jpeg", ".gif"]
+                        ):
+                            file_html = (
+                                f'<br><img src="{msg["file_url"]}"'
+                                ' style="max-width: 300px; border-radius: 4px;'
+                                ' margin-top: 8px;">'
+                            )
+                        elif any(
+                            msg["file_url"].endswith(ext)
+                            for ext in [".mp4", ".mov", ".avi", ".mkv"]
+                        ):
+                            file_html = (
+                                f'<br><video width="320" height="240" controls'
+                                ' style="margin-top: 8px; border-radius:'
+                                f' 4px;"><source src="{msg["file_url"]}"></video>'
+                            )
+                        elif any(
+                            msg["file_url"].endswith(ext)
+                            for ext in [".wav", ".mp3", ".ogg"]
+                        ):
+                            file_html = (
+                                f'<br><audio controls style="margin-top:'
+                                f' 8px;"><source src="{msg["file_url"]}"></audio>'
+                            )
+                        else:
+                            file_html = (
+                                f'<br><a href="{msg["file_url"]}"'
+                                ' target="_blank">📎 Download Attached File</a>'
+                            )
+
+                    # Message reply quote
+                    reply_html = ""
+                    if msg["reply_to_id"]:
+                        cursor.execute(
+                            "SELECT user, text FROM messages WHERE id = ?",
+                            (msg["reply_to_id"],),
+                        )
+                        parent_m = cursor.fetchone()
+                        if parent_m:
+                            reply_html = (
+                                f'<div class="reply-quote">↩ Replying to'
+                                f" <strong>{parent_m[0]}</strong>:"
+                                f" {parent_m[1]}</div>"
+                            )
+
+                    # Rich Media Preview Detection
+                    media_html = extract_media_html(msg["text"])
+
+                    # Display user badge
+                    badge_html = get_user_badge_html(
+                        msg["user"], st.session_state.current_channel
+                    )
+
+                    # Display message reactions
+                    reactions = get_reactions(msg["id"])
+                    reactions_html = ""
+                    if reactions:
+                        react_spans = []
+                        for emoji, users in reactions.items():
+                            react_spans.append(
+                                '<span style="background-color:'
+                                f' {border_color}; padding: 2px 6px;'
+                                " border-radius: 12px; font-size: 0.8em;"
+                                f' margin-right: 4px;" title="{", '
+                                f'join(users)}">{emoji} {len(users)}</span>'
+                            )
+                        reactions_html = (
+                            f'<div style="margin-top: 6px;">{"".join(react_spans)}</div>'
+                        )
+
+                    st.markdown(
+                        f"""
+                        <div class="chat-box">
+                            {reply_html}
+                            <strong>{msg['user']}</strong>{badge_html} <span style="font-size: 0.75em; color: #8b949e; float: right;">{msg['time']}</span><br>
+                            <div style="margin-top: 5px;">{msg['text']}</div>
+                            {file_html}
+                            {media_html}
+                            {reactions_html}
+                        </div>
+                    """,
+                        unsafe_allow_html=True,
+                    )
+
+                    # Quick reaction buttons & Threading/Bookmarks
+                    (
+                        r_col1,
+                        r_col2,
+                        r_col3,
+                        r_col4,
+                        r_col5,
+                        r_col6,
+                        r_col7,
+                        _,
+                    ) = st.columns([1, 1, 1, 1, 1, 1, 1, 6])
+                    if r_col1.button("👍", key=f"re_th_{msg['id']}"):
+                        cursor.execute(
+                            "INSERT OR IGNORE INTO reactions (message_id,"
+                            " emoji, username) VALUES (?, ?, ?)",
+                            (msg["id"], "👍", st.session_state.username),
+                        )
+                        conn.commit()
+                        st.rerun()
+                    if r_col2.button("❤️", key=f"re_hr_{msg['id']}"):
+                        cursor.execute(
+                            "INSERT OR IGNORE INTO reactions (message_id,"
+                            " emoji, username) VALUES (?, ?, ?)",
+                            (msg["id"], "❤️", st.session_state.username),
+                        )
+                        conn.commit()
+                        st.rerun()
+                    if r_col3.button("😂", key=f"re_la_{msg['id']}"):
+                        cursor.execute(
+                            "INSERT OR IGNORE INTO reactions (message_id,"
+                            " emoji, username) VALUES (?, ?, ?)",
+                            (msg["id"], "😂", st.session_state.username),
+                        )
+                        conn.commit()
+                        st.rerun()
+                    if r_col4.button("🔥", key=f"re_fi_{msg['id']}"):
+                        cursor.execute(
+                            "INSERT OR IGNORE INTO reactions (message_id,"
+                            " emoji, username) VALUES (?, ?, ?)",
+                            (msg["id"], "🔥", st.session_state.username),
+                        )
+                        conn.commit()
+                        st.rerun()
+                    if r_col5.button(
+                        "📌 Pin" if not msg["pinned"] else "📍 Unpin",
+                        key=f"pin_{msg['id']}",
+                    ):
+                        new_pin_val = 0 if msg["pinned"] else 1
+                        cursor.execute(
+                            "UPDATE messages SET pinned = ? WHERE id = ?",
+                            (new_pin_val, msg["id"]),
+                        )
+                        conn.commit()
+                        st.rerun()
+                    if r_col6.button("↩ Reply", key=f"rep_{msg['id']}"):
+                        st.session_state.replying_to_msg = msg["id"]
+                        st.rerun()
+                    if r_col7.button("🔖 Save", key=f"save_{msg['id']}"):
+                        cursor.execute(
+                            "INSERT OR IGNORE INTO saved_messages (username,"
+                            " message_id) VALUES (?, ?)",
+                            (st.session_state.username, msg["id"]),
+                        )
+                        conn.commit()
+                        st.toast("Saved message to bookmarks!")
+
+                    if msg["user"] == st.session_state.username:
+                        col_act_e, col_act_d, _ = st.columns([1, 1, 8])
+                        if col_act_e.button("Edit", key=f"edit_{msg['id']}"):
+                            st.session_state.editing_msg_id = msg["id"]
+                            st.rerun()
+                        if col_act_d.button("Delete", key=f"del_{msg['id']}"):
+                            cursor.execute(
+                                "DELETE FROM messages WHERE id = ?", (msg["id"],)
+                            )
+                            conn.commit()
+                            st.rerun()
+
+    # --- LIVE TYPING INDICATORS ---
+    now_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    cursor.execute(
+        "SELECT username FROM typing_status WHERE channel = ? AND username != ?",
+        (current_db_chan, st.session_state.username),
+    )
+    typing_users = [row[0] for row in cursor.fetchall()]
+    if typing_users:
+        st.markdown(
+            f"<p style='color: #8b949e; font-style: italic; font-size: 0.85em;'>💬 {', '.join(typing_users)} is typing...</p>",
+            unsafe_allow_html=True,
+        )
+
+    # Display Reply Banner
+    if st.session_state.replying_to_msg:
+        cursor.execute(
+            "SELECT user, text FROM messages WHERE id = ?",
+            (st.session_state.replying_to_msg,),
+        )
+        r_info = cursor.fetchone()
+        if r_info:
+            col_r_txt, col_r_btn = st.columns([9, 1])
+            col_r_txt.info(f"Replying to **{r_info[0]}**: {r_info[1]}")
+            if col_r_btn.button("Cancel"):
+                st.session_state.replying_to_msg = None
+                st.rerun()
+
+    # --- APPLE-STYLE INPUT BAR ---
+    with st.container():
+        user_msg = st.text_input(
+            "Message",
+            value=st.session_state.draft_message,
+            placeholder=f"Message {st.session_state.current_channel}...",
+            label_visibility="collapsed",
+            key="chat_input_field",
+        )
+
+        if user_msg != st.session_state.draft_message:
+            st.session_state.draft_message = user_msg
+            if user_msg.strip():
+                cursor.execute(
+                    "INSERT INTO typing_status (channel, username, timestamp) VALUES (?, ?, ?) ON CONFLICT(channel, username) DO UPDATE SET timestamp = ?",
+                    (current_db_chan, st.session_state.username, now_ts, now_ts),
+                )
+                conn.commit()
+
+        (
+            col_act_emoji,
+            col_act_timer,
+            col_act_audio,
+            col_act_file,
+            col_act_send,
+        ) = st.columns([1, 2, 2, 2, 3])
+
+        with col_act_emoji:
+            with st.popover("😀 Emoji"):
+                st.markdown("### Emojis")
+                emojis = [
+                    "😀",
+                    "😂",
+                    "👍",
+                    "❤️",
+                    "🔥",
+                    "🎉",
+                    "🚀",
+                    "💡",
+                    "🙌",
+                    "😎",
+                    "🤔",
+                    "✨",
+                ]
+                e_cols = st.columns(4)
+                for i, em in enumerate(emojis):
+                    with e_cols[i % 4]:
+                        if st.button(em, key=f"emoji_btn_{i}"):
+                            st.session_state.draft_message += em
+                            st.rerun()
+
+        with col_act_timer:
+            msg_timer = st.selectbox(
+                "⏳ Timer",
+                ["Never", "5 Minutes", "1 Hour", "24 Hours"],
+                label_visibility="collapsed",
+            )
+
+        with col_act_audio:
+            voice_note = st.audio_input(
+                "🎙 Record Voice Note", label_visibility="collapsed"
+            )
+
+        with col_act_file:
+            uploaded_file = st.file_uploader(
+                "Attach",
+                type=[
+                    "png",
+                    "jpg",
+                    "jpeg",
+                    "gif",
+                    "mp4",
+                    "mov",
+                    "avi",
+                    "mkv",
+                    "pdf",
+                    "txt",
+                    "wav",
+                    "mp3",
+                ],
+                label_visibility="collapsed",
+            )
+
+        if st.button("⬆ Send Message", use_container_width=True):
+            if (
+                st.session_state.draft_message.strip()
+                or uploaded_file is not None
+                or voice_note is not None
+            ):
+                banned_users = (
+                    get_group_bans(st.session_state.current_channel)
+                    if is_group
+                    else []
+                )
+                if st.session_state.username in banned_users:
+                    st.error("You are banned from sending messages here.")
+                elif is_group and is_user_muted_in_group(
+                    st.session_state.current_channel, st.session_state.username
+                ):
+                    st.error("You are muted in this group.")
+                elif st.session_state.simulate_network_error:
+                    st.error("Network error: Message not sent.")
+                else:
+                    cleaned_text = filter_message(
+                        st.session_state.draft_message
+                    )
+                    timestamp = datetime.now().strftime("%H:%M")
+                    db_chan = get_db_channel(
+                        st.session_state.username,
+                        st.session_state.current_channel,
+                    )
+
+                    file_path = None
+                    if uploaded_file:
+                        file_path = uploaded_file.name
+                    elif voice_note:
+                        file_path = f"voice_note_{datetime.now().strftime('%Y%m%d_%H%M%S')}.wav"
+                        with open(file_path, "wb") as f:
+                            f.write(voice_note.read())
+
+                    # Self-destruct message timer logic
+                    expires_at = None
+                    if msg_timer == "5 Minutes":
+                        expires_at = (
+                            datetime.now() + timedelta(minutes=5)
+                        ).strftime("%Y-%m-%d %H:%M:%S")
+                    elif msg_timer == "1 Hour":
+                        expires_at = (
+                            datetime.now() + timedelta(hours=1)
+                        ).strftime("%Y-%m-%d %H:%M:%S")
+                    elif msg_timer == "24 Hours":
+                        expires_at = (
+                            datetime.now() + timedelta(hours=24)
+                        ).strftime("%Y-%m-%d %H:%M:%S")
+
+                    cursor.execute(
+                        "INSERT INTO messages (channel, user, text, time,"
+                        " file_url, reply_to_id, expires_at) VALUES (?, ?, ?,"
+                        " ?, ?, ?, ?)",
+                        (
+                            db_chan,
+                            st.session_state.username,
+                            cleaned_text,
+                            timestamp,
+                            file_path,
+                            st.session_state.replying_to_msg,
+                            expires_at,
+                        ),
+                    )
+                    cursor.execute(
+                        "DELETE FROM typing_status WHERE channel = ? AND"
+                        " username = ?",
+                        (db_chan, st.session_state.username),
+                    )
+                    conn.commit()
+                    st.session_state.draft_message = ""
+                    st.session_state.replying_to_msg = None
+                    mark_channel_read(
+                        st.session_state.username,
+                        st.session_state.current_channel,
+                    )
+                    st.rerun()
+
+
+live_chat_stream()
